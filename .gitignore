@@ -12,6 +12,9 @@
 *.out
 coverage.*
 
+# Project-local development tools and Arduino build cache
+.tools/
+
 # OS metadata
 .DS_Store
 Thumbs.db
