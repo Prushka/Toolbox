@@ -63,7 +63,7 @@ func SearchPixel(b *Bitmap, start, end Point, want RGB, tolerance ColorTolerance
 	}
 	for y := start.Y; ; y += dy {
 		for x := start.X; ; x += dx {
-			if b.RGBAt(x, y).Matches(want, tolerance) {
+			if b.rgbAtUnchecked(x, y).Matches(want, tolerance) {
 				return Point{x, y}, true
 			}
 			if x == end.X {
@@ -99,10 +99,15 @@ func PixelMatchesTolerance(got, want RGB, t ColorTolerance) bool { return got.Ma
 
 // RelativePoint scales a point from a reference client size to a current one.
 func RelativePoint(p Point, reference, current image.Point) Point {
-	if reference.X <= 0 || reference.Y <= 0 {
+	if reference.X <= 0 || reference.Y <= 0 || current.X < 0 || current.Y < 0 {
 		return Point{}
 	}
-	return Point{p.X * current.X / reference.X, p.Y * current.Y / reference.Y}
+	x, xOK := checkedMulInt(p.X, current.X)
+	y, yOK := checkedMulInt(p.Y, current.Y)
+	if !xOK || !yOK {
+		return Point{}
+	}
+	return Point{x / reference.X, y / reference.Y}
 }
 
 func (w Window) Capture(clientOnly bool) (*Bitmap, error) {
@@ -195,9 +200,17 @@ func (w Window) ScalePoint(p Point, reference image.Point) (Point, error) {
 
 // WaitUntil polls without busy-waiting and stops promptly on cancellation.
 func WaitUntil(ctx context.Context, interval time.Duration, predicate func() (bool, error)) error {
+	if ctx == nil {
+		return ErrInvalidArgument
+	}
+	if predicate == nil {
+		return ErrInvalidArgument
+	}
 	if interval <= 0 {
 		interval = time.Millisecond
 	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	for {
 		ok, err := predicate()
 		if err != nil {
@@ -206,12 +219,10 @@ func WaitUntil(ctx context.Context, interval time.Duration, predicate func() (bo
 		if ok {
 			return nil
 		}
-		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return ctx.Err()
-		case <-timer.C:
+		case <-ticker.C:
 		}
 	}
 }

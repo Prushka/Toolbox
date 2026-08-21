@@ -25,8 +25,50 @@ type Point struct{ X, Y int }
 // Rect is a half-open rectangle: [Left,Right) x [Top,Bottom).
 type Rect struct{ Left, Top, Right, Bottom int }
 
-func (r Rect) Width() int  { return r.Right - r.Left }
-func (r Rect) Height() int { return r.Bottom - r.Top }
+var (
+	maxInt = int(^uint(0) >> 1)
+	minInt = -maxInt - 1
+)
+
+func checkedAddInt(a, b int) (int, bool) {
+	if (b > 0 && a > maxInt-b) || (b < 0 && a < minInt-b) {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func checkedSubInt(a, b int) (int, bool) {
+	if (b > 0 && a < minInt+b) || (b < 0 && a > maxInt+b) {
+		return 0, false
+	}
+	return a - b, true
+}
+
+func checkedMulInt(a, b int) (int, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if (a == minInt && b == -1) || (b == minInt && a == -1) {
+		return 0, false
+	}
+	v := a * b
+	return v, v/b == a
+}
+
+func (r Rect) Width() int {
+	v, ok := checkedSubInt(r.Right, r.Left)
+	if !ok {
+		return 0
+	}
+	return v
+}
+func (r Rect) Height() int {
+	v, ok := checkedSubInt(r.Bottom, r.Top)
+	if !ok {
+		return 0
+	}
+	return v
+}
 func (r Rect) Empty() bool { return r.Width() <= 0 || r.Height() <= 0 }
 func (r Rect) Contains(p Point) bool {
 	return p.X >= r.Left && p.X < r.Right && p.Y >= r.Top && p.Y < r.Bottom
@@ -50,7 +92,14 @@ func InclusiveRect(x1, y1, x2, y2 int) Rect {
 	if y1 > y2 {
 		y1, y2 = y2, y1
 	}
-	return Rect{x1, y1, x2 + 1, y2 + 1}
+	right, bottom := x2, y2
+	if right < maxInt {
+		right++
+	}
+	if bottom < maxInt {
+		bottom++
+	}
+	return Rect{x1, y1, right, bottom}
 }
 
 // RGB is an 8-bit red/green/blue color in the same order used by AHK's
@@ -67,12 +116,6 @@ type ColorTolerance struct{ R, G, B uint8 }
 
 func Tolerance(v uint8) ColorTolerance { return ColorTolerance{v, v, v} }
 func (c RGB) Matches(want RGB, t ColorTolerance) bool {
-	abs := func(a, b uint8) uint8 {
-		if a > b {
-			return a - b
-		}
-		return b - a
-	}
 	return abs(c.R, want.R) <= t.R && abs(c.G, want.G) <= t.G && abs(c.B, want.B) <= t.B
 }
 func abs(a, b uint8) uint8 {
@@ -82,42 +125,68 @@ func abs(a, b uint8) uint8 {
 	return b - a
 }
 
-// Bitmap is an immutable snapshot in tightly packed RGBA form.
+// Bitmap stores tightly packed RGBA pixels. Reads and writes are safe only
+// when callers do not mutate the bitmap concurrently.
 type Bitmap struct {
 	Width, Height int
 	Pixels        []byte
 }
 
+const maxBitmapBytes = 512 << 20
+
 func NewBitmap(width, height int) (*Bitmap, error) {
-	maxInt := int(^uint(0) >> 1)
-	if width <= 0 || height <= 0 || width > maxInt/4/height {
+	bytes, ok := bitmapByteLen(width, height)
+	if !ok || bytes > maxBitmapBytes {
 		return nil, ErrInvalidRect
 	}
-	return &Bitmap{Width: width, Height: height, Pixels: make([]byte, width*height*4)}, nil
+	return &Bitmap{Width: width, Height: height, Pixels: make([]byte, bytes)}, nil
 }
+
+func bitmapByteLen(width, height int) (int, bool) {
+	if width <= 0 || height <= 0 {
+		return 0, false
+	}
+	if width > maxInt/4/height {
+		return 0, false
+	}
+	return width * height * 4, true
+}
+
 func (b *Bitmap) boundsOK(x, y int) bool {
 	if b == nil || x < 0 || y < 0 || x >= b.Width || y >= b.Height {
 		return false
 	}
-	i := (int64(y)*int64(b.Width) + int64(x)) * 4
-	return i >= 0 && i+3 < int64(len(b.Pixels))
+	if y > (int(^uint(0)>>1))/b.Width {
+		return false
+	}
+	pixel := y*b.Width + x
+	return pixel <= maxInt/4 && pixel < len(b.Pixels)/4
 }
 func (b *Bitmap) valid() bool {
-	return b != nil && b.Width > 0 && b.Height > 0 && int64(b.Width)*int64(b.Height)*4 <= int64(len(b.Pixels))
+	if b == nil {
+		return false
+	}
+	bytes, ok := bitmapByteLen(b.Width, b.Height)
+	return ok && bytes <= len(b.Pixels) && bytes <= maxBitmapBytes
 }
 func (b *Bitmap) RGBAt(x, y int) RGB {
 	if !b.boundsOK(x, y) {
 		return RGB{}
 	}
-	i64 := (int64(y)*int64(b.Width) + int64(x)) * 4
-	if i64 < 0 || i64+3 >= int64(len(b.Pixels)) {
-		return RGB{}
-	}
-	i := int(i64)
+	return b.rgbAtUnchecked(x, y)
+}
+
+func (b *Bitmap) rgbAtUnchecked(x, y int) RGB {
+	i := (y*b.Width + x) * 4
 	return RGB{b.Pixels[i], b.Pixels[i+1], b.Pixels[i+2]}
 }
 func (b *Bitmap) ColorModel() color.Model { return color.RGBAModel }
-func (b *Bitmap) Bounds() image.Rectangle { return image.Rect(0, 0, b.Width, b.Height) }
+func (b *Bitmap) Bounds() image.Rectangle {
+	if b == nil || b.Width <= 0 || b.Height <= 0 {
+		return image.Rectangle{}
+	}
+	return image.Rect(0, 0, b.Width, b.Height)
+}
 func (b *Bitmap) At(x, y int) color.Color {
 	if !b.boundsOK(x, y) {
 		return color.RGBA{}
@@ -128,11 +197,14 @@ func (b *Bitmap) Set(x, y int, c RGB) {
 	if !b.boundsOK(x, y) {
 		return
 	}
-	i64 := (int64(y)*int64(b.Width) + int64(x)) * 4
-	if i64 < 0 || i64+3 >= int64(len(b.Pixels)) {
+	pixel := y*b.Width + x
+	if pixel > maxInt/4 {
 		return
 	}
-	i := int(i64)
+	i := pixel * 4
+	if i+3 >= len(b.Pixels) {
+		return
+	}
 	b.Pixels[i], b.Pixels[i+1], b.Pixels[i+2], b.Pixels[i+3] = c.R, c.G, c.B, 255
 }
 func (b *Bitmap) Clone() *Bitmap {
@@ -192,12 +264,24 @@ func (b *Bitmap) MatchesAll(expectations ...PixelExpectation) bool {
 	}
 	return true
 }
-func (b *Bitmap) WritePNG(w io.Writer) error { return png.Encode(w, b) }
-func (b *Bitmap) SavePNG(path string) error {
+func (b *Bitmap) WritePNG(w io.Writer) error {
+	if b == nil || !b.valid() || w == nil {
+		return ErrInvalidArgument
+	}
+	return png.Encode(w, b)
+}
+func (b *Bitmap) SavePNG(path string) (err error) {
+	if b == nil || !b.valid() {
+		return ErrInvalidArgument
+	}
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 	return b.WritePNG(f)
 }

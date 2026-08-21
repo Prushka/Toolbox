@@ -19,19 +19,32 @@ const (
 )
 
 func SetProcessPriority(pid uint32, p ProcessPriority) error {
-	h, _, _ := procOpenProcess.Call(processSetInformation, 0, uintptr(pid))
+	if pid == 0 || !validProcessPriority(p) {
+		return ErrInvalidArgument
+	}
+	h, _, callErr := procOpenProcess.Call(processSetInformation, 0, uintptr(pid))
 	if h == 0 {
-		return windows.GetLastError()
+		return winCallError(callErr, "OpenProcess failed")
 	}
 	defer procCloseHandle.Call(h)
-	if ret, _, _ := procSetPriorityClass.Call(h, uintptr(p)); ret == 0 {
-		return windows.GetLastError()
+	if ret, _, callErr := procSetPriorityClass.Call(h, uintptr(p)); ret == 0 {
+		return winCallError(callErr, "SetPriorityClass failed")
 	}
 	return nil
 }
 func (w Window) SetProcessPriority(p ProcessPriority) error {
-	if w.PID() == 0 {
+	pid := w.PID()
+	if pid == 0 {
 		return ErrNotFound
 	}
-	return SetProcessPriority(w.PID(), p)
+	return SetProcessPriority(pid, p)
+}
+
+func validProcessPriority(p ProcessPriority) bool {
+	switch p {
+	case PriorityIdle, PriorityBelowNormal, PriorityNormal, PriorityAboveNormal, PriorityHigh:
+		return true
+	default:
+		return false
+	}
 }

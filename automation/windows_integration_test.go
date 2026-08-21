@@ -3,6 +3,9 @@
 package automation
 
 import (
+	"errors"
+	"os"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -115,5 +118,43 @@ func TestTimerResolutionLifecycle(t *testing.T) {
 	}
 	if time.Since(start) < 1500*time.Microsecond {
 		t.Fatal("precise sleep returned early")
+	}
+}
+
+func TestWindowsRejectsInvalidArguments(t *testing.T) {
+	if _, err := CaptureWindow(HWND(1), CaptureOptions{Method: CaptureMethod(255)}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("invalid capture method=%v", err)
+	}
+	if _, err := CaptureScreen(Rect{maxInt - 1, 0, maxInt, 1}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("invalid screen rectangle=%v", err)
+	}
+	if _, _, _, err := makeDIB(1<<30, 1); !errors.Is(err, ErrInvalidRect) {
+		t.Fatalf("oversized DIB=%v", err)
+	}
+	if err := SetDisplayMode(DisplayMode{Width: 1, Height: 1, Frequency: -1}, false); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("invalid display mode=%v", err)
+	}
+	if err := SetProcessPriority(uint32(os.Getpid()), ProcessPriority(1)); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("invalid process priority=%v", err)
+	}
+}
+
+func TestSetDPIAwareConcurrent(t *testing.T) {
+	const n = 32
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- SetDPIAware()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }

@@ -45,8 +45,8 @@ type DisplayMode struct{ Width, Height, BitsPerPixel, Frequency int }
 func CurrentDisplayMode() (DisplayMode, error) {
 	var dm devMode
 	dm.Size = uint16(unsafe.Sizeof(dm))
-	if ret, _, _ := procEnumDisplaySettings.Call(0, uintptr(enumCurrentSettings), uintptr(unsafe.Pointer(&dm))); ret == 0 {
-		return DisplayMode{}, windows.GetLastError()
+	if ret, _, callErr := procEnumDisplaySettings.Call(0, uintptr(enumCurrentSettings), uintptr(unsafe.Pointer(&dm))); ret == 0 {
+		return DisplayMode{}, winCallError(callErr, "EnumDisplaySettings failed")
 	}
 	return modeFromDev(dm), nil
 }
@@ -81,6 +81,9 @@ func SetDisplayMode(m DisplayMode, permanent bool) error {
 	if m.Width <= 0 || m.Height <= 0 {
 		return ErrInvalidRect
 	}
+	if !fitsUint32(m.Width) || !fitsUint32(m.Height) || m.BitsPerPixel < 0 || m.Frequency < 0 || !fitsOptionalUint32(m.BitsPerPixel) || !fitsOptionalUint32(m.Frequency) {
+		return ErrInvalidArgument
+	}
 	var dm devMode
 	dm.Size = uint16(unsafe.Sizeof(dm))
 	dm.PelsWidth, dm.PelsHeight = uint32(m.Width), uint32(m.Height)
@@ -103,6 +106,11 @@ func SetDisplayMode(m DisplayMode, permanent bool) error {
 	}
 	return nil
 }
+
+func fitsUint32(v int) bool { return v > 0 && uint64(v) <= uint64(^uint32(0)) }
+func fitsOptionalUint32(v int) bool {
+	return v >= 0 && uint64(v) <= uint64(^uint32(0))
+}
 func RestoreDisplayMode() error {
 	ret, _, _ := procChangeDisplaySettings.Call(0, 0)
 	if int32(ret) != dispChangeSuccessful {
@@ -123,15 +131,21 @@ type monitorInfo struct {
 
 func Monitors() ([]Monitor, error) {
 	var out []Monitor
+	var callbackErr error
 	cb := windows.NewCallback(func(hmon, hdc, rect, data uintptr) uintptr {
 		mi := monitorInfo{Size: uint32(unsafe.Sizeof(monitorInfo{}))}
-		if ok, _, _ := procGetMonitorInfo.Call(hmon, uintptr(unsafe.Pointer(&mi))); ok != 0 {
-			out = append(out, Monitor{Rect: Rect{int(mi.Monitor.Left), int(mi.Monitor.Top), int(mi.Monitor.Right), int(mi.Monitor.Bottom)}, WorkArea: Rect{int(mi.Work.Left), int(mi.Work.Top), int(mi.Work.Right), int(mi.Work.Bottom)}, Primary: mi.Flags&monitorInfoPrimary != 0})
+		if ok, _, callErr := procGetMonitorInfo.Call(hmon, uintptr(unsafe.Pointer(&mi))); ok == 0 {
+			callbackErr = winCallError(callErr, "GetMonitorInfo failed")
+			return 0
 		}
+		out = append(out, Monitor{Rect: Rect{int(mi.Monitor.Left), int(mi.Monitor.Top), int(mi.Monitor.Right), int(mi.Monitor.Bottom)}, WorkArea: Rect{int(mi.Work.Left), int(mi.Work.Top), int(mi.Work.Right), int(mi.Work.Bottom)}, Primary: mi.Flags&monitorInfoPrimary != 0})
 		return 1
 	})
-	if ret, _, _ := procEnumDisplayMonitors.Call(0, 0, cb, 0); ret == 0 {
-		return nil, windows.GetLastError()
+	if ret, _, callErr := procEnumDisplayMonitors.Call(0, 0, cb, 0); ret == 0 {
+		if callbackErr != nil {
+			return nil, callbackErr
+		}
+		return nil, winCallError(callErr, "EnumDisplayMonitors failed")
 	}
 	return out, nil
 }

@@ -30,6 +30,8 @@ type Template struct {
 	options ImageSearchOptions
 }
 
+const maxTemplateBytes = 256 << 20
+
 func CompileTemplate(img image.Image, o ImageSearchOptions) (*Template, error) {
 	if img == nil {
 		return nil, fmt.Errorf("nil image")
@@ -37,8 +39,25 @@ func CompileTemplate(img image.Image, o ImageSearchOptions) (*Template, error) {
 	if img.Bounds().Empty() || o.Width < -1 || o.Height < -1 {
 		return nil, ErrInvalidRect
 	}
-	return &Template{bitmap: imageToTemplate(img, o), options: o}, nil
+	o = cloneImageSearchOptions(o)
+	b, err := imageToTemplate(img, o)
+	if err != nil {
+		return nil, err
+	}
+	// Transparency is compiled into the alpha mask, keeping the hot search
+	// loop pointer-free and independent of caller-owned option storage.
+	o.Transparent = nil
+	return &Template{bitmap: b, options: o}, nil
 }
+
+func cloneImageSearchOptions(o ImageSearchOptions) ImageSearchOptions {
+	if o.Transparent != nil {
+		c := *o.Transparent
+		o.Transparent = &c
+	}
+	return o
+}
+
 func LoadTemplate(path string, o ImageSearchOptions) (*Template, error) {
 	img, e := LoadImage(path)
 	if e != nil {
@@ -91,11 +110,16 @@ func ParseImageSearchOptions(spec string) (ImageSearchOptions, string, error) {
 		}
 		cut++
 	}
-	return o, strings.Join(fields[cut:], " "), nil
+	path := strings.Join(fields[cut:], " ")
+	if len(path) >= 2 && path[0] == '"' && path[len(path)-1] == '"' {
+		path = path[1 : len(path)-1]
+	}
+	return o, path, nil
 }
 
 func parseHexColor(v string) (RGB, error) {
 	v = strings.TrimPrefix(strings.TrimPrefix(v, "0x"), "0X")
+	v = strings.TrimPrefix(v, "#")
 	if len(v) != 6 {
 		return RGB{}, fmt.Errorf("expected RRGGBB")
 	}
@@ -125,6 +149,22 @@ func namedColor(v string) (RGB, bool) {
 		return RGB{0, 255, 255}, true
 	case "gray", "grey":
 		return RGB{128, 128, 128}, true
+	case "silver":
+		return RGB{192, 192, 192}, true
+	case "maroon":
+		return RGB{128, 0, 0}, true
+	case "purple":
+		return RGB{128, 0, 128}, true
+	case "lime":
+		return RGB{0, 255, 0}, true
+	case "olive":
+		return RGB{128, 128, 0}, true
+	case "navy":
+		return RGB{0, 0, 128}, true
+	case "teal":
+		return RGB{0, 128, 128}, true
+	case "orange":
+		return RGB{255, 165, 0}, true
 	default:
 		return RGB{}, false
 	}
@@ -178,8 +218,14 @@ func SearchTemplate(source *Bitmap, region Rect, template *Template) (Point, boo
 	if source == nil || template == nil {
 		return Point{}, false, fmt.Errorf("nil image")
 	}
+	if !source.valid() {
+		return Point{}, false, ErrInvalidArgument
+	}
 	t, o := template.bitmap, template.options
-	if t.Width <= 0 || t.Height <= 0 || t.Width > source.Width || t.Height > source.Height {
+	if !t.valid() {
+		return Point{}, false, ErrInvalidArgument
+	}
+	if t.Width > source.Width || t.Height > source.Height {
 		return Point{}, false, nil
 	}
 	if region == (Rect{}) {
@@ -201,6 +247,9 @@ func SearchTemplate(source *Bitmap, region Rect, template *Template) (Point, boo
 	if region.Bottom > source.Height {
 		region.Bottom = source.Height
 	}
+	if region.Empty() {
+		return Point{}, false, nil
+	}
 	maxX, maxY := region.Right-t.Width, region.Bottom-t.Height
 	for y := region.Top; y <= maxY; y++ {
 		for x := region.Left; x <= maxX; x++ {
@@ -219,57 +268,100 @@ type templateBitmap struct {
 	Anchors       []int
 }
 
-func imageToTemplate(src image.Image, o ImageSearchOptions) templateBitmap {
-	b := src.Bounds()
-	w, h := b.Dx(), b.Dy()
-	if o.Width != 0 || o.Height != 0 {
-		w, h = scaledSize(w, h, o.Width, o.Height)
+func (t templateBitmap) valid() bool {
+	bytes, ok := bitmapByteLen(t.Width, t.Height)
+	if !ok || bytes > maxTemplateBytes {
+		return false
 	}
-	t := templateBitmap{Width: w, Height: h, Pixels: make([]byte, w*h*3), Alpha: make([]uint8, w*h)}
+	pixels := bytes / 4
+	if len(t.Pixels) < pixels*3 || len(t.Alpha) < pixels {
+		return false
+	}
+	for _, anchor := range t.Anchors {
+		if anchor < 0 || anchor >= pixels {
+			return false
+		}
+	}
+	return true
+}
+
+func imageToTemplate(src image.Image, o ImageSearchOptions) (templateBitmap, error) {
+	b := src.Bounds()
+	sourceWidth, sourceHeight := b.Dx(), b.Dy()
+	w, h := sourceWidth, sourceHeight
+	if o.Width != 0 || o.Height != 0 {
+		var err error
+		w, h, err = scaledSize(w, h, o.Width, o.Height)
+		if err != nil {
+			return templateBitmap{}, err
+		}
+	}
+	bytes, ok := bitmapByteLen(w, h)
+	if !ok || bytes > maxTemplateBytes {
+		return templateBitmap{}, ErrInvalidRect
+	}
+	pixelCount := bytes / 4
+	t := templateBitmap{Width: w, Height: h, Pixels: make([]byte, pixelCount*3), Alpha: make([]uint8, pixelCount)}
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			sx, sy := x, y
-			if w != b.Dx() {
-				sx = x * b.Dx() / w
+			if w != sourceWidth {
+				sx = scaleIndex(x, sourceWidth, w)
 			}
-			if h != b.Dy() {
-				sy = y * b.Dy() / h
+			if h != sourceHeight {
+				sy = scaleIndex(y, sourceHeight, h)
 			}
 			r, g, bl, a := src.At(b.Min.X+sx, b.Min.Y+sy).RGBA()
 			i := (y*w + x) * 3
-			t.Pixels[i], t.Pixels[i+1], t.Pixels[i+2], t.Alpha[y*w+x] = uint8(r>>8), uint8(g>>8), uint8(bl>>8), uint8(a>>8)
+			c := RGB{uint8(r >> 8), uint8(g >> 8), uint8(bl >> 8)}
+			alpha := uint8(a >> 8)
+			if o.Transparent != nil && c == *o.Transparent {
+				alpha = 0
+			}
+			t.Pixels[i], t.Pixels[i+1], t.Pixels[i+2], t.Alpha[y*w+x] = c.R, c.G, c.B, alpha
 		}
 	}
-	var eligible []int
+	eligibleCount := 0
 	for i := 0; i < w*h; i++ {
 		if t.Alpha[i] == 0 {
 			continue
 		}
-		j := i * 3
-		c := RGB{t.Pixels[j], t.Pixels[j+1], t.Pixels[j+2]}
-		if o.Transparent == nil || c != *o.Transparent {
-			eligible = append(eligible, i)
-		}
+		eligibleCount++
 	}
-	if len(eligible) > 0 {
-		for _, q := range []int{0, len(eligible) / 3, 2 * len(eligible) / 3, len(eligible) - 1} {
-			a := eligible[q]
-			duplicate := false
-			for _, v := range t.Anchors {
-				if v == a {
-					duplicate = true
+	if eligibleCount > 0 {
+		ordinals := [4]int{0, eligibleCount / 3, 2 * eligibleCount / 3, eligibleCount - 1}
+		eligibleOrdinal := 0
+		ordinalSlot := 0
+		for i := 0; i < w*h && ordinalSlot < len(ordinals); i++ {
+			if t.Alpha[i] == 0 {
+				continue
+			}
+			if eligibleOrdinal == ordinals[ordinalSlot] {
+				t.Anchors = append(t.Anchors, i)
+				selectedOrdinal := ordinals[ordinalSlot]
+				for ordinalSlot < len(ordinals) && ordinals[ordinalSlot] == selectedOrdinal {
+					ordinalSlot++
 				}
 			}
-			if !duplicate {
-				t.Anchors = append(t.Anchors, a)
-			}
+			eligibleOrdinal++
 		}
 	}
-	return t
+	return t, nil
 }
-func scaledSize(w, h, ow, oh int) (int, int) {
+
+// scaleIndex computes index*source/destination without overflowing. index is
+// always smaller than destination and template dimensions are allocation-capped.
+func scaleIndex(index, source, destination int) int {
+	q, rem := source/destination, source%destination
+	return index*q + int(int64(index)*int64(rem)/int64(destination))
+}
+
+func scaledSize(w, h, ow, oh int) (int, int, error) {
+	if w <= 0 || h <= 0 || ow < -1 || oh < -1 {
+		return 0, 0, ErrInvalidRect
+	}
 	if ow == 0 && oh == 0 {
-		return w, h
+		return w, h, nil
 	}
 	if ow == -1 && oh == 0 {
 		ow = w
@@ -278,9 +370,15 @@ func scaledSize(w, h, ow, oh int) (int, int) {
 		oh = h
 	}
 	if ow == -1 {
+		if oh <= 0 || w > maxInt/oh {
+			return 0, 0, ErrInvalidRect
+		}
 		ow = max(1, w*oh/h)
 	}
 	if oh == -1 {
+		if ow <= 0 || h > maxInt/ow {
+			return 0, 0, ErrInvalidRect
+		}
 		oh = max(1, h*ow/w)
 	}
 	if ow <= 0 {
@@ -289,7 +387,10 @@ func scaledSize(w, h, ow, oh int) (int, int) {
 	if oh <= 0 {
 		oh = h
 	}
-	return ow, oh
+	if _, ok := bitmapByteLen(ow, oh); !ok {
+		return 0, 0, ErrInvalidRect
+	}
+	return ow, oh, nil
 }
 func max(a, b int) int {
 	if a > b {
@@ -300,7 +401,7 @@ func max(a, b int) int {
 func imageAt(s *Bitmap, x, y int, t templateBitmap, o ImageSearchOptions) bool {
 	for _, ti := range t.Anchors {
 		tx, ty := ti%t.Width, ti/t.Width
-		if !templatePixelMatches(s.RGBAt(x+tx, y+ty), t, ti, o) {
+		if !templatePixelMatches(s.rgbAtUnchecked(x+tx, y+ty), t, ti, o) {
 			return false
 		}
 	}
@@ -310,7 +411,7 @@ func imageAt(s *Bitmap, x, y int, t templateBitmap, o ImageSearchOptions) bool {
 			if t.Alpha[ti] == 0 {
 				continue
 			}
-			if !templatePixelMatches(s.RGBAt(x+tx, y+ty), t, ti, o) {
+			if !templatePixelMatches(s.rgbAtUnchecked(x+tx, y+ty), t, ti, o) {
 				return false
 			}
 		}
@@ -324,9 +425,6 @@ func templatePixelMatches(c RGB, t templateBitmap, ti int, o ImageSearchOptions)
 	}
 	i := ti * 3
 	tc := RGB{t.Pixels[i], t.Pixels[i+1], t.Pixels[i+2]}
-	if o.Transparent != nil && tc == *o.Transparent {
-		return true
-	}
 	return c.Matches(tc, Tolerance(o.Variation))
 }
 

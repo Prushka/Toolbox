@@ -9,6 +9,7 @@ import (
 )
 
 var processStarted = time.Now()
+var jitterRandMu sync.Mutex
 
 // TickCount returns milliseconds elapsed since this package was initialized,
 // equivalent to the monotonic portion of AHK's A_TickCount for process-local
@@ -25,6 +26,12 @@ func FormatTimestamp(t time.Time, layout string) string {
 // Sleep is a context-aware replacement for AHK Sleep. It returns nil when the
 // duration elapsed, or ctx.Err when canceled.
 func Sleep(ctx context.Context, d time.Duration) error {
+	if ctx == nil {
+		return ErrInvalidArgument
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if d <= 0 {
 		select {
 		case <-ctx.Done():
@@ -46,6 +53,9 @@ func Sleep(ctx context.Context, d time.Duration) error {
 // PreciseSleep uses a short final spin to reduce scheduler overshoot while
 // retaining a bounded CPU cost. It does not change system timer resolution.
 func PreciseSleep(ctx context.Context, d time.Duration) error {
+	if ctx == nil {
+		return ErrInvalidArgument
+	}
 	if d <= 0 {
 		return Sleep(ctx, d)
 	}
@@ -73,23 +83,50 @@ func PreciseSleep(ctx context.Context, d time.Duration) error {
 // JitterSleep sleeps in [d-minus,d+plus], useful when a caller wants the
 // randomized timing behavior of the Genshin scripts without hidden globals.
 func JitterSleep(ctx context.Context, d, minus, plus time.Duration, r *rand.Rand) error {
+	if ctx == nil {
+		return ErrInvalidArgument
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if minus < 0 {
 		minus = 0
 	}
 	if plus < 0 {
 		plus = 0
 	}
-	lo := d - minus
-	if lo < 0 {
-		lo = 0
+	maxDuration := time.Duration(1<<63 - 1)
+	lo := time.Duration(0)
+	if d > 0 && minus < d {
+		lo = d - minus
+	}
+	if minus > maxDuration-plus {
+		return ErrInvalidArgument
 	}
 	span := minus + plus
+	if lo > maxDuration-span {
+		return ErrInvalidArgument
+	}
 	delta := time.Duration(0)
 	if span > 0 {
-		if r == nil {
-			r = rand.New(rand.NewSource(time.Now().UnixNano()))
+		if span == maxDuration {
+			if r == nil {
+				delta = time.Duration(rand.Int63())
+			} else {
+				jitterRandMu.Lock()
+				delta = time.Duration(r.Int63())
+				jitterRandMu.Unlock()
+			}
+		} else if r == nil {
+			delta = time.Duration(rand.Int63n(int64(span) + 1))
+		} else {
+			jitterRandMu.Lock()
+			delta = time.Duration(r.Int63n(int64(span) + 1))
+			jitterRandMu.Unlock()
 		}
-		delta = time.Duration(r.Int63n(int64(span) + 1))
+	}
+	if lo > maxDuration-delta {
+		return ErrInvalidArgument
 	}
 	return Sleep(ctx, lo+delta)
 }

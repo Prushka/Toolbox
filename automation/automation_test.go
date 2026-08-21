@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -67,6 +70,15 @@ func TestBitmapRejectsInvalidStorage(t *testing.T) {
 	if _, e := bad.Crop(Rect{}); e == nil {
 		t.Fatal("expected malformed bitmap error")
 	}
+	if _, ok := SearchPixel(nil, Point{}, Point{}, RGB{}, Tolerance(0)); ok {
+		t.Fatal("nil bitmap unexpectedly matched")
+	}
+	if err := bad.WritePNG(&bytes.Buffer{}); err == nil {
+		t.Fatal("expected malformed bitmap PNG error")
+	}
+	malformed := &Bitmap{Width: maxInt, Height: 1, Pixels: make([]byte, 4)}
+	_ = malformed.RGBAt(maxInt-1, 0)
+	malformed.Set(maxInt-1, 0, RGB{1, 2, 3})
 }
 
 func TestImageSearchVariationTransparencyAndScale(t *testing.T) {
@@ -109,6 +121,55 @@ func TestParseImageOptions(t *testing.T) {
 	if _, _, e = ParseImageSearchOptions("*NoSuch x"); e == nil {
 		t.Fatal("expected unsupported option error")
 	}
+	if _, path, e = ParseImageSearchOptions(`*w10 "C:\\Program Files\\icon.png"`); e != nil || path != `C:\\Program Files\\icon.png` {
+		t.Fatalf("quoted path=%q,%v", path, e)
+	}
+}
+
+type solidImage struct {
+	bounds image.Rectangle
+	c      color.Color
+}
+
+func (s solidImage) ColorModel() color.Model { return color.RGBAModel }
+func (s solidImage) Bounds() image.Rectangle { return s.bounds }
+func (s solidImage) At(x, y int) color.Color { return s.c }
+
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestTemplateOwnershipAndLimits(t *testing.T) {
+	source, _ := NewBitmap(2, 1)
+	source.Set(0, 0, RGB{1, 2, 3})
+	source.Set(1, 0, RGB{9, 9, 9})
+	transparent := RGB{1, 2, 3}
+	tplImage := image.NewRGBA(image.Rect(0, 0, 2, 1))
+	tplImage.SetRGBA(0, 0, color.RGBA{1, 2, 3, 255})
+	tplImage.SetRGBA(1, 0, color.RGBA{9, 9, 9, 255})
+	tpl, err := CompileTemplate(tplImage, ImageSearchOptions{Transparent: &transparent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transparent = RGB{99, 99, 99}
+	if _, ok, err := SearchTemplate(source, Rect{}, tpl); err != nil || !ok {
+		t.Fatalf("template changed after option mutation: %v,%v", ok, err)
+	}
+	tooLarge := solidImage{bounds: image.Rect(0, 0, 1<<30, 1), c: color.RGBA{255, 255, 255, 255}}
+	if _, err := CompileTemplate(tooLarge, ImageSearchOptions{}); err == nil {
+		t.Fatal("expected huge template rejection")
+	}
+	bad := &Template{bitmap: templateBitmap{Width: 2, Height: 2, Pixels: make([]byte, 1), Alpha: make([]uint8, 1)}}
+	if _, _, err := SearchTemplate(source, Rect{}, bad); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("malformed template error=%v", err)
+	}
+	badAnchor := &Template{bitmap: templateBitmap{Width: 1, Height: 1, Pixels: make([]byte, 3), Alpha: make([]uint8, 1), Anchors: []int{1}}}
+	if _, _, err := SearchTemplate(source, Rect{}, badAnchor); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("malformed anchor error=%v", err)
+	}
+	if _, err := CompileTemplate(tplImage, ImageSearchOptions{Width: -1, Height: -1}); !errors.Is(err, ErrInvalidRect) {
+		t.Fatalf("ambiguous scale error=%v", err)
+	}
 }
 
 func TestINIAndLogger(t *testing.T) {
@@ -128,10 +189,27 @@ func TestINIAndLogger(t *testing.T) {
 	}
 	var out bytes.Buffer
 	l := NewLogger(&out)
-	l.Prefix = "test"
+	l.SetPrefix("test")
 	l.Printf("hello %d", 3)
 	if !strings.Contains(out.String(), "test hello 3") {
 		t.Fatalf("log=%q", out.String())
+	}
+	if err := WriteINI(path, "bad\nsection", "key", "value"); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("invalid section error=%v", err)
+	}
+	if err := WriteINI(path, "settings", "key", "line1\nline2"); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("invalid value error=%v", err)
+	}
+	large := strings.Repeat("x", 128*1024)
+	if err := WriteINI(path, "settings", "large", large); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadINI(path, "settings", "large", ""); err != nil || got != large {
+		t.Fatalf("large INI value length=%d, error=%v", len(got), err)
+	}
+	writeErr := errors.New("write failed")
+	if err := NewLogger(failingWriter{writeErr}).PrintfErr("message"); !errors.Is(err, writeErr) {
+		t.Fatalf("logger write error=%v", err)
 	}
 	_ = os.Remove(path)
 }
@@ -154,6 +232,111 @@ func TestWaitSleep(t *testing.T) {
 	if e := JitterSleep(context.Background(), time.Millisecond, 0, 0, r); e != nil {
 		t.Fatal(e)
 	}
+	if e := Sleep(nil, time.Millisecond); !errors.Is(e, ErrInvalidArgument) {
+		t.Fatalf("nil Sleep context=%v", e)
+	}
+	if e := PreciseSleep(nil, time.Millisecond); !errors.Is(e, ErrInvalidArgument) {
+		t.Fatalf("nil PreciseSleep context=%v", e)
+	}
+	if e := JitterSleep(nil, time.Millisecond, 0, 0, r); !errors.Is(e, ErrInvalidArgument) {
+		t.Fatalf("nil JitterSleep context=%v", e)
+	}
+	if e := WaitUntil(nil, time.Millisecond, func() (bool, error) { return true, nil }); !errors.Is(e, ErrInvalidArgument) {
+		t.Fatalf("nil WaitUntil context=%v", e)
+	}
+	if e := WaitUntil(context.Background(), time.Millisecond, nil); !errors.Is(e, ErrInvalidArgument) {
+		t.Fatalf("nil WaitUntil predicate=%v", e)
+	}
+	if e := JitterSleep(context.Background(), time.Duration(1<<63-1), 0, 1, r); !errors.Is(e, ErrInvalidArgument) {
+		t.Fatalf("duration overflow=%v", e)
+	}
+}
+
+func TestConcurrentINIAndLogger(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "concurrent.ini")
+	const n = 24
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			key := fmt.Sprintf("key-%d", i)
+			if err := WriteINI(path, "values", key, strconv.Itoa(i)); err != nil {
+				t.Errorf("WriteINI(%s): %v", key, err)
+			}
+			_, _ = ReadINI(path, "values", key, "")
+		}()
+	}
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		got, err := ReadINI(path, "values", fmt.Sprintf("key-%d", i), "")
+		if err != nil || got != strconv.Itoa(i) {
+			t.Fatalf("key-%d=%q,%v", i, got, err)
+		}
+	}
+	ini := NewINI()
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ini.Set("values", fmt.Sprintf("key-%d", i), strconv.Itoa(i))
+			_ = ini.Get("values", fmt.Sprintf("key-%d", i), "")
+			if err := ini.Save(path); err != nil {
+				t.Errorf("INI.Save: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	var out bytes.Buffer
+	l := NewLogger(&out)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			l.SetPrefix(strconv.Itoa(i))
+			l.Printf("message %d", i)
+			_ = l.PrintfErr("message %d", i)
+		}(i)
+	}
+	wg.Wait()
+	l.SetPrefix("final")
+	if l.Prefix() != "final" || !strings.Contains(out.String(), "message") {
+		t.Fatalf("logger output=%q", out.String())
+	}
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			l.Printf("during close")
+			_ = l.Close()
+		}()
+	}
+	wg.Wait()
+}
+
+func TestConcurrentJitterAndTimerClose(t *testing.T) {
+	r := rand.New(rand.NewSource(2))
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = JitterSleep(context.Background(), 0, time.Millisecond, 0, r)
+		}()
+	}
+	wg.Wait()
+	timer, err := BeginTimerResolution(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = timer.Close() }()
+	}
+	wg.Wait()
 }
 
 func TestRelativePoint(t *testing.T) {

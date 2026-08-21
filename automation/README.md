@@ -50,6 +50,19 @@ return err
 
 Compile templates once with `LoadTemplate` or `CompileTemplate` when searching repeatedly. Capture only the region needed; `Window.SearchPixel`, `Window.SearchTemplate`, and `Window.CaptureRegion` do this automatically.
 
+Compiled templates are immutable and safe for concurrent searches. A `Bitmap`
+may be read concurrently while no goroutine mutates its `Pixels` or calls
+`Set`; synchronize mutation externally. Search loops do not allocate, template
+and capture allocations are bounded, and the default visible capture uses one
+screen DC plus one memory DIB per frame.
+
+`INI` methods, same-process `ReadINI`/`WriteINI` calls for the same path,
+`Logger`, and `TimerResolution.Close` are concurrency-safe. Use
+`Logger.SetPrefix` and `Logger.Prefix` rather than unsynchronized fields, and
+use `Logger.PrintfErr` when a write failure must be reported. `JitterSleep`
+serializes access to a supplied `*rand.Rand`; code using that generator outside
+`JitterSleep` must provide its own synchronization.
+
 ## AHK mapping
 
 | AHK usage in the source projects | Go API |

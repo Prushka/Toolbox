@@ -26,7 +26,8 @@ func (a App) ToggleOrStart() (Window, *exec.Cmd, error) {
 	if a.Command == "" {
 		return Window{}, nil, ErrNotFound
 	}
-	cmd := exec.Command(a.Command, a.Args...)
+	args := append([]string(nil), a.Args...)
+	cmd := exec.Command(a.Command, args...)
 	if e := cmd.Start(); e != nil {
 		return Window{}, nil, e
 	}
@@ -34,11 +35,22 @@ func (a App) ToggleOrStart() (Window, *exec.Cmd, error) {
 }
 
 func (w Window) Center(bounds Rect) error {
+	if bounds.Empty() {
+		return ErrInvalidRect
+	}
 	r, e := w.Rect()
 	if e != nil {
 		return e
 	}
-	return w.Move(Point{bounds.Left + (bounds.Width()-r.Width())/2, bounds.Top + (bounds.Height()-r.Height())/2})
+	x, ok := checkedAddInt(bounds.Left, (bounds.Width()-r.Width())/2)
+	if !ok {
+		return ErrInvalidArgument
+	}
+	y, ok := checkedAddInt(bounds.Top, (bounds.Height()-r.Height())/2)
+	if !ok {
+		return ErrInvalidArgument
+	}
+	return w.Move(Point{x, y})
 }
 
 type SnapPosition uint8
@@ -52,6 +64,9 @@ const (
 )
 
 func (w Window) Snap(bounds Rect, p SnapPosition) error {
+	if bounds.Empty() {
+		return ErrInvalidRect
+	}
 	r, e := w.Rect()
 	if e != nil {
 		return e
@@ -59,16 +74,33 @@ func (w Window) Snap(bounds Rect, p SnapPosition) error {
 	x, y := r.Left, r.Top
 	switch p {
 	case SnapCenter:
-		x = bounds.Left + (bounds.Width()-r.Width())/2
-		y = bounds.Top + (bounds.Height()-r.Height())/2
+		var ok bool
+		x, ok = checkedAddInt(bounds.Left, (bounds.Width()-r.Width())/2)
+		if !ok {
+			return ErrInvalidArgument
+		}
+		y, ok = checkedAddInt(bounds.Top, (bounds.Height()-r.Height())/2)
+		if !ok {
+			return ErrInvalidArgument
+		}
 	case SnapLeft:
 		x = bounds.Left
 	case SnapRight:
-		x = bounds.Right - r.Width()
+		var ok bool
+		x, ok = checkedSubInt(bounds.Right, r.Width())
+		if !ok {
+			return ErrInvalidArgument
+		}
 	case SnapTop:
 		y = bounds.Top
 	case SnapBottom:
-		y = bounds.Bottom - r.Height()
+		var ok bool
+		y, ok = checkedSubInt(bounds.Bottom, r.Height())
+		if !ok {
+			return ErrInvalidArgument
+		}
+	default:
+		return ErrInvalidArgument
 	}
 	return w.Move(Point{x, y})
 }

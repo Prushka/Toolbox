@@ -5,6 +5,7 @@ package automation
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -58,18 +59,30 @@ const (
 type Window struct{ HWND HWND }
 
 func (w Window) Handle() HWND { return w.HWND }
-func (w Window) Valid() bool  { v, _, _ := procIsWindow.Call(uintptr(w.HWND)); return v != 0 }
+func (w Window) Valid() bool {
+	if w.HWND == 0 {
+		return false
+	}
+	v, _, _ := procIsWindow.Call(uintptr(w.HWND))
+	return v != 0
+}
 func (w Window) Title() string {
 	return getWindowString(procGetWindowTextLength, procGetWindowText, w.HWND)
 }
 func (w Window) Class() string { return getClass(w.HWND) }
 func (w Window) PID() uint32 {
+	if w.HWND == 0 {
+		return 0
+	}
 	var pid uint32
 	procGetWindowThreadProcessId.Call(uintptr(w.HWND), uintptr(unsafe.Pointer(&pid)))
 	return pid
 }
 func (w Window) ProcessPath() string {
-	pid := w.PID()
+	return processPath(w.PID())
+}
+
+func processPath(pid uint32) string {
 	if pid == 0 {
 		return ""
 	}
@@ -78,31 +91,46 @@ func (w Window) ProcessPath() string {
 		return ""
 	}
 	defer procCloseHandle.Call(h)
-	buf := make([]uint16, 32768)
-	n := uint32(len(buf))
-	if ret, _, _ := procQueryFullProcessImageName.Call(h, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&n))); ret == 0 {
-		return ""
+	for size := uint32(256); size <= 32768; size *= 2 {
+		buf := make([]uint16, size)
+		n := size
+		ret, _, callErr := procQueryFullProcessImageName.Call(h, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&n)))
+		if ret != 0 {
+			return windows.UTF16ToString(buf[:n])
+		}
+		if callErr != windows.ERROR_INSUFFICIENT_BUFFER {
+			return ""
+		}
 	}
-	return windows.UTF16ToString(buf[:n])
+	return ""
 }
 func (w Window) Rect() (Rect, error) {
+	if !w.Valid() {
+		return Rect{}, ErrNotFound
+	}
 	var r winRect
-	if ret, _, _ := procGetWindowRect.Call(uintptr(w.HWND), uintptr(unsafe.Pointer(&r))); ret == 0 {
-		return Rect{}, windows.GetLastError()
+	if ret, _, callErr := procGetWindowRect.Call(uintptr(w.HWND), uintptr(unsafe.Pointer(&r))); ret == 0 {
+		return Rect{}, winCallError(callErr, "GetWindowRect failed")
 	}
 	return Rect{int(r.Left), int(r.Top), int(r.Right), int(r.Bottom)}, nil
 }
 func (w Window) ClientRect() (Rect, error) {
+	if !w.Valid() {
+		return Rect{}, ErrNotFound
+	}
 	var r winRect
-	if ret, _, _ := procGetClientRect.Call(uintptr(w.HWND), uintptr(unsafe.Pointer(&r))); ret == 0 {
-		return Rect{}, windows.GetLastError()
+	if ret, _, callErr := procGetClientRect.Call(uintptr(w.HWND), uintptr(unsafe.Pointer(&r))); ret == 0 {
+		return Rect{}, winCallError(callErr, "GetClientRect failed")
 	}
 	return Rect{int(r.Left), int(r.Top), int(r.Right), int(r.Bottom)}, nil
 }
 func (w Window) ClientOrigin() (Point, error) {
+	if !w.Valid() {
+		return Point{}, ErrNotFound
+	}
 	p := winPoint{}
-	if ret, _, _ := procClientToScreen.Call(uintptr(w.HWND), uintptr(unsafe.Pointer(&p))); ret == 0 {
-		return Point{}, windows.GetLastError()
+	if ret, _, callErr := procClientToScreen.Call(uintptr(w.HWND), uintptr(unsafe.Pointer(&p))); ret == 0 {
+		return Point{}, winCallError(callErr, "ClientToScreen failed")
 	}
 	return Point{int(p.X), int(p.Y)}, nil
 }
@@ -110,6 +138,9 @@ func (w Window) IsVisible() bool   { v, _, _ := procIsWindowVisible.Call(uintptr
 func (w Window) IsMinimized() bool { v, _, _ := procIsIconic.Call(uintptr(w.HWND)); return v != 0 }
 func (w Window) IsMaximized() bool { v, _, _ := procIsZoomed.Call(uintptr(w.HWND)); return v != 0 }
 func (w Window) Activate() error {
+	if !w.Valid() {
+		return ErrNotFound
+	}
 	if w.IsMinimized() {
 		procShowWindow.Call(uintptr(w.HWND), swRestore)
 	}
@@ -125,17 +156,35 @@ func (w Window) Minimize() error { return showWindow(w.HWND, swMinimize) }
 func (w Window) Maximize() error { return showWindow(w.HWND, swMaximize) }
 func (w Window) Restore() error  { return showWindow(w.HWND, swRestore) }
 func (w Window) Close() error {
-	if ret, _, _ := procPostMessage.Call(uintptr(w.HWND), wmClose, 0, 0); ret == 0 {
-		return windows.GetLastError()
+	if !w.Valid() {
+		return ErrNotFound
+	}
+	if ret, _, callErr := procPostMessage.Call(uintptr(w.HWND), wmClose, 0, 0); ret == 0 {
+		return winCallError(callErr, "PostMessage(WM_CLOSE) failed")
 	}
 	return nil
 }
 func (w Window) SetBounds(r Rect) error {
+	if !w.Valid() {
+		return ErrNotFound
+	}
 	if r.Empty() {
 		return ErrInvalidRect
 	}
-	if ret, _, _ := procSetWindowPos.Call(uintptr(w.HWND), 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Width()), uintptr(r.Height()), swpNoZOrder|swpShowWindow); ret == 0 {
-		return windows.GetLastError()
+	left, ok := toWinInt32(r.Left)
+	if !ok {
+		return ErrInvalidArgument
+	}
+	top, ok := toWinInt32(r.Top)
+	if !ok {
+		return ErrInvalidArgument
+	}
+	width, height := r.Width(), r.Height()
+	if width <= 0 || height <= 0 || width > 1<<31-1 || height > 1<<31-1 {
+		return ErrInvalidRect
+	}
+	if ret, _, callErr := procSetWindowPos.Call(uintptr(w.HWND), 0, uintptr(left), uintptr(top), uintptr(width), uintptr(height), swpNoZOrder|swpShowWindow); ret == 0 {
+		return winCallError(callErr, "SetWindowPos failed")
 	}
 	return nil
 }
@@ -144,16 +193,38 @@ func (w Window) Move(p Point) error {
 	if e != nil {
 		return e
 	}
-	return w.SetBounds(Rect{p.X, p.Y, p.X + r.Width(), p.Y + r.Height()})
+	right, ok := checkedAddInt(p.X, r.Width())
+	if !ok {
+		return ErrInvalidArgument
+	}
+	bottom, ok := checkedAddInt(p.Y, r.Height())
+	if !ok {
+		return ErrInvalidArgument
+	}
+	return w.SetBounds(Rect{p.X, p.Y, right, bottom})
 }
 func (w Window) Resize(width, height int) error {
+	if width <= 0 || height <= 0 {
+		return ErrInvalidRect
+	}
 	r, e := w.Rect()
 	if e != nil {
 		return e
 	}
-	return w.SetBounds(Rect{r.Left, r.Top, r.Left + width, r.Top + height})
+	right, ok := checkedAddInt(r.Left, width)
+	if !ok {
+		return ErrInvalidArgument
+	}
+	bottom, ok := checkedAddInt(r.Top, height)
+	if !ok {
+		return ErrInvalidArgument
+	}
+	return w.SetBounds(Rect{r.Left, r.Top, right, bottom})
 }
 func (w Window) Toggle() error {
+	if !w.Valid() {
+		return ErrNotFound
+	}
 	if w.IsMinimized() {
 		return w.Activate()
 	}
@@ -171,16 +242,38 @@ func showWindow(hwnd HWND, cmd uintptr) error {
 }
 
 func (w Window) ClientToScreen(p Point) (Point, error) {
-	n := winPoint{int32(p.X), int32(p.Y)}
-	if ret, _, _ := procClientToScreen.Call(uintptr(w.HWND), uintptr(unsafe.Pointer(&n))); ret == 0 {
-		return Point{}, windows.GetLastError()
+	if !w.Valid() {
+		return Point{}, ErrNotFound
+	}
+	x, ok := toWinInt32(p.X)
+	if !ok {
+		return Point{}, ErrInvalidArgument
+	}
+	y, ok := toWinInt32(p.Y)
+	if !ok {
+		return Point{}, ErrInvalidArgument
+	}
+	n := winPoint{x, y}
+	if ret, _, callErr := procClientToScreen.Call(uintptr(w.HWND), uintptr(unsafe.Pointer(&n))); ret == 0 {
+		return Point{}, winCallError(callErr, "ClientToScreen failed")
 	}
 	return Point{int(n.X), int(n.Y)}, nil
 }
 func (w Window) ScreenToClient(p Point) (Point, error) {
-	n := winPoint{int32(p.X), int32(p.Y)}
-	if ret, _, _ := procScreenToClient.Call(uintptr(w.HWND), uintptr(unsafe.Pointer(&n))); ret == 0 {
-		return Point{}, windows.GetLastError()
+	if !w.Valid() {
+		return Point{}, ErrNotFound
+	}
+	x, ok := toWinInt32(p.X)
+	if !ok {
+		return Point{}, ErrInvalidArgument
+	}
+	y, ok := toWinInt32(p.Y)
+	if !ok {
+		return Point{}, ErrInvalidArgument
+	}
+	n := winPoint{x, y}
+	if ret, _, callErr := procScreenToClient.Call(uintptr(w.HWND), uintptr(unsafe.Pointer(&n))); ret == 0 {
+		return Point{}, winCallError(callErr, "ScreenToClient failed")
 	}
 	return Point{int(n.X), int(n.Y)}, nil
 }
@@ -199,41 +292,59 @@ func ActiveWindow() (Window, error) {
 	return Window{HWND(h)}, nil
 }
 func FindWindows(q WindowQuery) ([]Window, error) {
+	return findWindows(q, false)
+}
+
+func findWindows(q WindowQuery, firstOnly bool) ([]Window, error) {
+	titleContains := strings.ToLower(q.TitleContains)
 	var out []Window
+	stopped := false
 	cb := windows.NewCallback(func(hwnd uintptr, lparam uintptr) uintptr {
 		w := Window{HWND(hwnd)}
 		if q.VisibleOnly && !w.IsVisible() {
 			return 1
 		}
-		if q.PID != 0 && w.PID() != q.PID {
+		pid := uint32(0)
+		if q.PID != 0 || q.Process != "" {
+			pid = w.PID()
+		}
+		if q.PID != 0 && pid != q.PID {
 			return 1
 		}
-		if q.Title != "" && !strings.EqualFold(w.Title(), q.Title) {
+		title := ""
+		if q.Title != "" || titleContains != "" {
+			title = w.Title()
+		}
+		if q.Title != "" && !strings.EqualFold(title, q.Title) {
 			return 1
 		}
-		if q.TitleContains != "" && !strings.Contains(strings.ToLower(w.Title()), strings.ToLower(q.TitleContains)) {
+		if titleContains != "" && !strings.Contains(strings.ToLower(title), titleContains) {
 			return 1
 		}
 		if q.Class != "" && !strings.EqualFold(w.Class(), q.Class) {
 			return 1
 		}
 		if q.Process != "" {
-			p := w.ProcessPath()
+			p := processPath(pid)
 			if !strings.EqualFold(p, q.Process) && !strings.EqualFold(pathBase(p), q.Process) {
 				return 1
 			}
 		}
 		out = append(out, w)
+		if firstOnly {
+			stopped = true
+			return 0
+		}
 		return 1
 	})
-	ret, _, _ := procEnumWindows.Call(cb, 0)
-	if ret == 0 {
-		return nil, windows.GetLastError()
+	ret, _, callErr := procEnumWindows.Call(cb, 0)
+	if ret == 0 && !stopped {
+		return nil, winCallError(callErr, "EnumWindows failed")
 	}
 	return out, nil
 }
 func FindWindow(q WindowQuery) (Window, error) {
-	ws, e := FindWindows(q)
+	ws, e := findWindows(q, true)
 	if e != nil {
 		return Window{}, e
 	}
@@ -259,7 +370,7 @@ func pathBase(p string) string {
 }
 func getWindowString(lenProc, getProc *windows.LazyProc, hwnd HWND) string {
 	n, _, _ := lenProc.Call(uintptr(hwnd))
-	if n == 0 {
+	if n == 0 || n >= uintptr(maxInt-1) {
 		return ""
 	}
 	buf := make([]uint16, n+1)
@@ -278,27 +389,57 @@ func getClass(hwnd HWND) string {
 	return windows.UTF16ToString(buf[:r])
 }
 func ScreenRect() Rect {
-	return Rect{int(getMetric(smXVirtualScreen)), int(getMetric(smYVirtualScreen)), int(getMetric(smXVirtualScreen) + getMetric(smCXVirtualScreen)), int(getMetric(smYVirtualScreen) + getMetric(smCYVirtualScreen))}
+	left := int(getMetric(smXVirtualScreen))
+	top := int(getMetric(smYVirtualScreen))
+	width := int(getMetric(smCXVirtualScreen))
+	height := int(getMetric(smCYVirtualScreen))
+	right, ok := checkedAddInt(left, width)
+	if !ok {
+		return Rect{}
+	}
+	bottom, ok := checkedAddInt(top, height)
+	if !ok {
+		return Rect{}
+	}
+	return Rect{left, top, right, bottom}
 }
 func PrimaryScreenRect() Rect {
 	return Rect{0, 0, int(getMetric(smCXScreen)), int(getMetric(smCYScreen))}
 }
 func getMetric(i int) int32 { v, _, _ := procGetSystemMetrics.Call(uintptr(i)); return int32(v) }
+
+var (
+	dpiOnce sync.Once
+	dpiErr  error
+)
+
 func SetDPIAware() error {
-	if procSetProcessDPIAwarenessContext.Find() == nil {
-		// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 is the signed handle -4.
-		if ret, _, callErr := procSetProcessDPIAwarenessContext.Call(^uintptr(3)); ret != 0 {
-			return nil
-		} else if callErr != windows.ERROR_INVALID_PARAMETER {
-			return callErr
+	dpiOnce.Do(func() {
+		if err := procSetProcessDPIAwarenessContext.Find(); err == nil {
+			// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 is the signed handle -4.
+			if ret, _, callErr := procSetProcessDPIAwarenessContext.Call(^uintptr(3)); ret != 0 {
+				return
+			} else if callErr == windows.ERROR_ACCESS_DENIED {
+				return
+			} else if callErr != windows.ERROR_INVALID_PARAMETER {
+				dpiErr = winCallError(callErr, "SetProcessDpiAwarenessContext failed")
+				return
+			}
 		}
-	}
-	if ret, _, _ := procSetProcessDPIAware.Call(); ret == 0 {
-		return windows.GetLastError()
-	}
-	return nil
+		if err := procSetProcessDPIAware.Find(); err != nil {
+			dpiErr = err
+			return
+		}
+		if ret, _, callErr := procSetProcessDPIAware.Call(); ret == 0 && callErr != windows.ERROR_ACCESS_DENIED {
+			dpiErr = winCallError(callErr, "SetProcessDPIAware failed")
+		}
+	})
+	return dpiErr
 }
 func WindowDPI(w Window) uint32 {
+	if procGetDpiForWindow.Find() != nil {
+		return 96
+	}
 	if ret, _, _ := procGetDpiForWindow.Call(uintptr(w.HWND)); ret != 0 {
 		return uint32(ret)
 	}
