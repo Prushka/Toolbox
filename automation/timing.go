@@ -80,8 +80,8 @@ func PreciseSleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// JitterSleep sleeps in [d-minus,d+plus], useful when a caller wants the
-// randomized timing behavior of the Genshin scripts without hidden globals.
+// JitterSleep sleeps in [d-minus,d+plus], providing caller-controlled timing
+// variation without hidden random-number generators or global configuration.
 func JitterSleep(ctx context.Context, d, minus, plus time.Duration, r *rand.Rand) error {
 	if ctx == nil {
 		return ErrInvalidArgument

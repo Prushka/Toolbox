@@ -2,12 +2,12 @@
 
 `automation` is a low-level Go package for the screen observation, image/pixel
 matching, window management, display management, timing, INI, and logging
-facilities used by the AHK scripts in `btd6-ahk` and `GenshinAHK`. It is a
-primitive library rather than a bot framework: callers own the workflow,
-retry policy, and application-specific decisions.
+facilities commonly used in AutoHotkey automation. It is a primitive library
+rather than a workflow framework: callers own retry policy, orchestration, and
+application-specific decisions.
 
 The package deliberately has no keyboard or mouse synthesis, hotkeys, input
-hooks, cursor clipping, serial/HID integration, game memory access, code
+hooks, cursor clipping, serial/HID integration, process memory access, code
 injection, DLL loading into other processes, or security-bypass features.
 
 The Windows implementation uses documented User32, GDI32, Kernel32, and WinMM
@@ -52,8 +52,8 @@ func observe(ctx context.Context) error {
 		return err
 	}
 
-	game, err := automation.FindWindow(automation.WindowQuery{
-		Process:     "BloonsTD6.exe",
+	target, err := automation.FindWindow(automation.WindowQuery{
+		Process:     "ExampleApp.exe",
 		VisibleOnly: true,
 	})
 	if err != nil {
@@ -61,7 +61,7 @@ func observe(ctx context.Context) error {
 	}
 
 	// Compile/decode once when searching for the same image repeatedly.
-	tpl, err := automation.LoadTemplate(`img\states\victory.png`, automation.ImageSearchOptions{
+	tpl, err := automation.LoadTemplate(`assets\ready.png`, automation.ImageSearchOptions{
 		Variation: 42,
 	})
 	if err != nil {
@@ -69,7 +69,7 @@ func observe(ctx context.Context) error {
 	}
 
 	return automation.WaitUntil(ctx, 16*time.Millisecond, func() (bool, error) {
-		_, found, err := game.SearchTemplate(automation.Rect{}, tpl)
+		_, found, err := target.SearchTemplate(automation.Rect{}, tpl)
 		return found, err
 	})
 }
@@ -113,8 +113,8 @@ bad geometry return an error.
 
 `RelativePoint` and `Window.ScalePoint` scale a reference client-coordinate
 point to a current client size using integer arithmetic. This is useful for
-the resolution-relative AHK coordinates used by the source projects, but does
-not replace testing an actual responsive layout.
+resolution-relative coordinates in fixed-layout applications, but does not
+replace testing an actual responsive layout.
 
 Use `Window.ClientToScreen`, `Window.ScreenToClient`, and `Window.ClientOrigin`
 only when a boundary needs to be crossed. Window pixel/capture/search helpers
@@ -130,12 +130,12 @@ when the effective DPI is needed.
 screen, err := automation.CaptureScreen(automation.InclusiveRect(0, 0, 799, 599))
 color, err := automation.PixelColor(100, 100)
 
-// Client-area coordinates relative to game.
-region, err := game.CaptureRegion(
+// Client-area coordinates relative to the target window.
+region, err := target.CaptureRegion(
 	automation.Rect{Left: 120, Top: 80, Right: 520, Bottom: 320},
 	automation.CaptureOptions{},
 )
-color, err = game.Pixel(100, 100)
+color, err = target.Pixel(100, 100)
 ```
 
 Capture produces an owned RGBA `Bitmap`. Internally, Windows capture uses a
@@ -172,14 +172,14 @@ rectangle and always scans top-to-bottom, left-to-right after normalization.
 Both return the first match and `false` when no match exists.
 
 ```go
-point, found, err := game.SearchPixel(
+point, found, err := target.SearchPixel(
 	automation.InclusiveRect(1450, 325, 1520, 349),
 	automation.RGB{R: 92, G: 225, B: 0},
 	automation.ColorTolerance{R: 30, G: 30, B: 2},
 )
 ```
 
-The returned point is client-relative to `game`, not relative to the supplied
+The returned point is client-relative to `target`, not relative to the supplied
 region. A missing match is `(Point{}, false, nil)`.
 
 ### Image search
@@ -244,7 +244,7 @@ otherwise return a Windows error or `ErrNotFound`.
 - `TitleContains`: case-insensitive title substring.
 - `Class`: exact, case-insensitive window class.
 - `Process`: case-insensitive full process path or basename, such as
-  `game.exe`. This opens a query-limited process handle while filtering.
+  `example-app.exe`. This opens a query-limited process handle while filtering.
 - `PID`: exact process identifier.
 - `VisibleOnly`: excludes windows Windows reports as not visible.
 
@@ -312,7 +312,7 @@ necessary because it can affect timer granularity and power use.
 ## INI files and logging
 
 `INI` is a small case-insensitive section/key representation compatible with
-the AHK `IniRead`/`IniWrite` patterns used by the source projects. It recognizes
+common AHK `IniRead`/`IniWrite` patterns. It recognizes
 section headers, `key=value` pairs, and `;`/`#` comment lines. `LoadINI` permits
 lines up to 4 MiB. `Get`, `Set`, `Delete`, and `Save` provide the in-memory API;
 `ReadINI` and `WriteINI` provide focused file helpers.
@@ -366,7 +366,7 @@ Win32 error when available. Search misses are not errors: search methods return
 
 ## AHK mapping
 
-| AHK usage in the source projects | Go API |
+| AHK functionality | Go API |
 | --- | --- |
 | `PixelGetColor`, RGB checks | `PixelColor`, `Window.Pixel`, `RGB.Matches`, `Bitmap.MatchesAll` |
 | `PixelSearch` | `SearchPixel`, `SearchPixelRect`, `Window.SearchPixel` |
@@ -386,8 +386,9 @@ Win32 error when available. Search misses are not errors: search methods return
 | Timestamped `FileAppend` logging | `Logger` |
 | Read-only `MouseGetPos` | `CursorPosition` |
 
-Keyboard/mouse input, hotkeys, HID emulation, cursor clipping, game-specific
-decision sequences, and presentation/debug UI remain outside this package.
+Keyboard/mouse input, hotkeys, HID emulation, cursor clipping,
+application-specific decision sequences, and presentation/debug UI remain
+outside this package.
 
 ## Verification and references
 

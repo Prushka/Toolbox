@@ -38,7 +38,7 @@ selectors must match. The comparisons are case-insensitive.
 | `-title` | Exact window title. |
 | `-title-contains` | Window-title substring. |
 | `-class` | Exact Win32 window class. |
-| `-process` | Process basename such as `game.exe`, or a full path. |
+| `-process` | Process basename such as `example-app.exe`, or a full path. |
 | `-pid` | Process ID. |
 | `-visible` | Require a window Windows reports as visible. Defaults vary by command; use `-h` to inspect the default. |
 
@@ -64,9 +64,9 @@ Capture an explicit client region from a window selected by process name:
 
 ```powershell
 go run ./cmd/automation/capture `
-  -process game.exe `
+  -process example-app.exe `
   -region "120,80,520,320" `
-  -output game-region.png
+  -output app-region.png
 ```
 
 Capture physical screen coordinates from the visible virtual desktop:
@@ -102,12 +102,12 @@ Search the foreground window's whole client area for a color:
 go run ./cmd/automation/pixel-search -color 5CE100 -tolerance 30,30,2
 ```
 
-Search only a client-relative game region. A single tolerance value applies to
+Search only a client-relative application region. A single tolerance value applies to
 all channels; `r,g,b` uses independent per-channel values.
 
 ```powershell
 go run ./cmd/automation/pixel-search `
-  -process game.exe `
+  -process example-app.exe `
   -region "1450,325,1521,350" `
   -color 5CE100 `
   -tolerance 30,30,2
@@ -122,8 +122,8 @@ Search once using a compiled PNG/JPEG/GIF/BMP/TIFF template:
 
 ```powershell
 go run ./cmd/automation/image-search `
-  -process game.exe `
-  -image img/states/victory.png `
+  -process example-app.exe `
+  -image assets/ready.png `
   -variation 42
 ```
 
@@ -131,8 +131,8 @@ Wait up to 20 seconds, checking at a bounded interval. Press Ctrl+C to cancel.
 
 ```powershell
 go run ./cmd/automation/image-search `
-  -process game.exe `
-  -image img/states/victory.png `
+  -process example-app.exe `
+  -image assets/ready.png `
   -region "1300,250,1650,500" `
   -variation 42 `
   -timeout 20s `
@@ -144,7 +144,7 @@ image argument through `-spec`:
 
 ```powershell
 go run ./cmd/automation/image-search `
-  -process game.exe `
+  -process example-app.exe `
   -spec '*42 *TransBlack *w100 *h-1 "img\target.png"'
 ```
 
