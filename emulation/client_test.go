@@ -19,6 +19,16 @@ type harnessResponse struct {
 	respond bool
 }
 
+type closeErrorTransport struct {
+	net.Conn
+	err error
+}
+
+func (transport *closeErrorTransport) Close() error {
+	_ = transport.Conn.Close()
+	return transport.err
+}
+
 type clientHarness struct {
 	client   *Client
 	server   net.Conn
@@ -132,6 +142,30 @@ func TestCommandTimeout(t *testing.T) {
 	}
 }
 
+func TestWaitingCommandHonorsContext(t *testing.T) {
+	firstStarted := make(chan struct{})
+	var once sync.Once
+	harness := newClientHarness(t, func(wireFrame) harnessResponse {
+		once.Do(func() {
+			close(firstStarted)
+			time.Sleep(100 * time.Millisecond)
+		})
+		return harnessResponse{respond: true}
+	})
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- harness.client.Ping(context.Background()) }()
+	<-firstStarted
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := harness.client.Ping(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queued Ping error = %v, want deadline exceeded", err)
+	}
+	if err := <-firstResult; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPressReleasesChordInReverseOrder(t *testing.T) {
 	harness := newClientHarness(t, nil, WithTapDelay(0))
 	if err := harness.client.Press(context.Background(), Ctrl, MustKey('a')); err != nil {
@@ -139,6 +173,18 @@ func TestPressReleasesChordInReverseOrder(t *testing.T) {
 	}
 	assertCommand(t, harness.next(t), opKeyDown, []byte{byte(Ctrl), 'a'})
 	assertCommand(t, harness.next(t), opKeyUp, []byte{'a', byte(Ctrl)})
+}
+
+func TestInvalidTapDoesNotReleaseExistingKeys(t *testing.T) {
+	harness := newClientHarness(t, nil)
+	if err := harness.client.Press(context.Background(), 0); err == nil {
+		t.Fatal("Press accepted an invalid key")
+	}
+	select {
+	case command := <-harness.commands:
+		t.Fatalf("invalid Press emitted command: %#v", command)
+	case <-time.After(20 * time.Millisecond):
+	}
 }
 
 func TestKeyValidation(t *testing.T) {
@@ -201,9 +247,24 @@ func TestTypeChunksTextAndHandlesControlKeys(t *testing.T) {
 	assertCommand(t, harness.next(t), opKeyUp, []byte{byte(KeyBackspace)})
 }
 
+func TestTypeNormalizesCRLF(t *testing.T) {
+	harness := newClientHarness(t, nil, WithTapDelay(0))
+	if err := harness.client.Type(context.Background(), "a\r\nb\rc\nd"); err != nil {
+		t.Fatal(err)
+	}
+	for _, payload := range [][]byte{{'a'}, {'b'}, {'c'}, {'d'}} {
+		assertCommand(t, harness.next(t), opTypeASCII, payload)
+		if payload[0] != 'd' {
+			assertCommand(t, harness.next(t), opKeyDown, []byte{byte(KeyEnter)})
+			assertCommand(t, harness.next(t), opKeyUp, []byte{byte(KeyEnter)})
+		}
+	}
+}
+
 func TestTypeRejectsUnicodeBeforeSending(t *testing.T) {
 	harness := newClientHarness(t, nil)
-	if err := harness.client.Type(context.Background(), "ok\u4e16"); err == nil {
+	text := string(bytes.Repeat([]byte{'a'}, maxPayload+1)) + "\u4e16"
+	if err := harness.client.Type(context.Background(), text); err == nil {
 		t.Fatal("Type accepted non-ASCII text")
 	}
 	// The valid prefix is buffered until the entire operation can continue, so
@@ -212,6 +273,82 @@ func TestTypeRejectsUnicodeBeforeSending(t *testing.T) {
 	case command := <-harness.commands:
 		t.Fatalf("unexpected partial command: %#v", command)
 	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestRecoversAfterCorruptResponse(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	client, err := NewClient(clientSide, WithTimeout(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.shutdown()
+	defer serverSide.Close()
+	serverErr := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(serverSide)
+		first, err := readFrame(reader, requestMagic)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		response, _ := encodeFrame(responseMagic, first.sequence, byte(statusOK), nil)
+		response[len(response)-1] ^= 0xFF
+		if err = writeAll(serverSide, response); err != nil {
+			serverErr <- err
+			return
+		}
+		second, err := readFrame(reader, requestMagic)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		response, _ = encodeFrame(responseMagic, second.sequence, byte(statusOK), nil)
+		serverErr <- writeAll(serverSide, response)
+	}()
+	if err := client.Ping(context.Background()); !errors.Is(err, errBadChecksum) {
+		t.Fatalf("first Ping error = %v, want checksum error", err)
+	}
+	if err := client.Ping(context.Background()); err != nil {
+		t.Fatalf("second Ping after resynchronization: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIgnoresDelayedResponseAfterTimeout(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	client, err := NewClient(clientSide, WithTimeout(25*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.shutdown()
+	defer serverSide.Close()
+	reader := bufio.NewReader(serverSide)
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- client.Ping(context.Background()) }()
+	first, err := readFrame(reader, requestMagic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = <-firstResult; err == nil {
+		t.Fatal("first Ping did not time out")
+	}
+
+	secondResult := make(chan error, 1)
+	go func() { secondResult <- client.Ping(context.Background()) }()
+	second, err := readFrame(reader, requestMagic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := encodeFrame(responseMagic, first.sequence, byte(statusOK), nil)
+	fresh, _ := encodeFrame(responseMagic, second.sequence, byte(statusOK), nil)
+	if err = writeAll(serverSide, append(stale, fresh...)); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-secondResult; err != nil {
+		t.Fatalf("second Ping rejected after stale response: %v", err)
 	}
 }
 
@@ -268,6 +405,32 @@ func TestMouseButtonsAndClick(t *testing.T) {
 	}
 }
 
+func TestInvalidClickDoesNotReleaseExistingButtons(t *testing.T) {
+	harness := newClientHarness(t, nil)
+	if err := harness.client.Click(context.Background(), Button(0x80)); err == nil {
+		t.Fatal("Click accepted an invalid button")
+	}
+	select {
+	case command := <-harness.commands:
+		t.Fatalf("invalid Click emitted command: %#v", command)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestNoOpMethodsRejectNilContext(t *testing.T) {
+	harness := newClientHarness(t, nil)
+	for name, operation := range map[string]func() error{
+		"Do":     func() error { return harness.client.Do(nil) },
+		"Move":   func() error { return harness.client.Move(nil, 0, 0) },
+		"Scroll": func() error { return harness.client.Scroll(nil, 0, 0) },
+		"Type":   func() error { return harness.client.Type(nil, "") },
+	} {
+		if err := operation(); err == nil {
+			t.Errorf("%s accepted a nil context", name)
+		}
+	}
+}
+
 func TestResetCommands(t *testing.T) {
 	harness := newClientHarness(t, nil)
 	ctx := context.Background()
@@ -307,6 +470,33 @@ func TestCloseSendsReleaseAll(t *testing.T) {
 	if err := harness.client.Close(); err != nil {
 		t.Fatalf("second Close = %v", err)
 	}
+}
+
+func TestCloseReturnsTransportErrorConsistently(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	sentinel := errors.New("close failed")
+	client, err := NewClient(&closeErrorTransport{Conn: clientSide, err: sentinel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		request, readErr := readFrame(bufio.NewReader(serverSide), requestMagic)
+		if readErr != nil {
+			return
+		}
+		response, _ := encodeFrame(responseMagic, request.sequence, byte(statusOK), nil)
+		_ = writeAll(serverSide, response)
+		_ = serverSide.Close()
+	}()
+	if err := client.Close(); !errors.Is(err, sentinel) {
+		t.Fatalf("first Close error = %v, want %v", err, sentinel)
+	}
+	if err := client.Close(); !errors.Is(err, sentinel) {
+		t.Fatalf("second Close error = %v, want %v", err, sentinel)
+	}
+	<-serverDone
 }
 
 func TestConcurrentCommandsAreSerialized(t *testing.T) {

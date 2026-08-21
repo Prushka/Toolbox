@@ -86,11 +86,12 @@ func readFrame(reader *bufio.Reader, magic byte) (wireFrame, error) {
 	if _, err := io.ReadFull(reader, header); err != nil {
 		return wireFrame{}, err
 	}
+	frame := wireFrame{sequence: header[1], code: header[2]}
 	if header[0] != protocolVersion {
-		return wireFrame{}, fmt.Errorf("%w: got %d, want %d", errBadVersion, header[0], protocolVersion)
+		return frame, fmt.Errorf("%w: got %d, want %d", errBadVersion, header[0], protocolVersion)
 	}
 	if header[3] > maxPayload {
-		return wireFrame{}, errFrameLarge
+		return frame, errFrameLarge
 	}
 
 	payloadAndCRC := make([]byte, int(header[3])+1)
@@ -100,14 +101,12 @@ func readFrame(reader *bufio.Reader, magic byte) (wireFrame, error) {
 	checksumInput := append([]byte{magic}, header...)
 	checksumInput = append(checksumInput, payloadAndCRC[:len(payloadAndCRC)-1]...)
 	if crc8(checksumInput) != payloadAndCRC[len(payloadAndCRC)-1] {
-		return wireFrame{}, errBadChecksum
+		frame.payload = append([]byte(nil), payloadAndCRC[:len(payloadAndCRC)-1]...)
+		return frame, errBadChecksum
 	}
 
-	return wireFrame{
-		sequence: header[1],
-		code:     header[2],
-		payload:  append([]byte(nil), payloadAndCRC[:len(payloadAndCRC)-1]...),
-	}, nil
+	frame.payload = append([]byte(nil), payloadAndCRC[:len(payloadAndCRC)-1]...)
+	return frame, nil
 }
 
 // CRC-8/SMBUS: polynomial 0x07, initial value 0, no reflection.

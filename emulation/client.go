@@ -15,6 +15,7 @@ import (
 const (
 	defaultTimeout  = 2 * time.Second
 	defaultTapDelay = 20 * time.Millisecond
+	cleanupTimeout  = 250 * time.Millisecond
 )
 
 var (
@@ -119,12 +120,16 @@ type Client struct {
 	timeout   time.Duration
 	tapDelay  time.Duration
 
-	commandMu sync.Mutex
-	sequence  byte
-	responses chan responseResult
-	done      chan struct{}
-	closed    atomic.Bool
-	closeOnce sync.Once
+	commandMu  chan struct{}
+	sequence   byte
+	responses  chan responseResult
+	readerDone chan struct{}
+	readerOnce sync.Once
+	readErrMu  sync.RWMutex
+	readErr    error
+	closed     atomic.Bool
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 // NewClient binds a client to an already-open byte stream. Most callers should
@@ -144,29 +149,103 @@ func NewClient(transport io.ReadWriteCloser, options ...Option) (*Client, error)
 	}
 
 	client := &Client{
-		transport: transport,
-		reader:    bufio.NewReader(transport),
-		timeout:   configuration.timeout,
-		tapDelay:  configuration.tapDelay,
-		responses: make(chan responseResult, 4),
-		done:      make(chan struct{}),
+		transport:  transport,
+		reader:     bufio.NewReader(transport),
+		timeout:    configuration.timeout,
+		tapDelay:   configuration.tapDelay,
+		commandMu:  make(chan struct{}, 1),
+		responses:  make(chan responseResult, 1),
+		readerDone: make(chan struct{}),
 	}
+	client.commandMu <- struct{}{}
 	go client.readResponses()
 	return client, nil
 }
 
 func (client *Client) readResponses() {
-	defer close(client.done)
-	defer close(client.responses)
+	defer client.signalReaderDone()
 	for {
 		frame, err := readFrame(client.reader, responseMagic)
 		if err != nil {
+			if isRecoverableFrameError(err) {
+				select {
+				case client.responses <- responseResult{frame: frame, err: err}:
+				case <-client.readerDone:
+					return
+				}
+				continue
+			}
 			if !client.closed.Load() {
-				client.responses <- responseResult{err: err}
+				client.setReaderError(err)
 			}
 			return
 		}
-		client.responses <- responseResult{frame: frame}
+		select {
+		case client.responses <- responseResult{frame: frame}:
+		case <-client.readerDone:
+			return
+		}
+	}
+}
+
+func isRecoverableFrameError(err error) bool {
+	return errors.Is(err, errBadChecksum) || errors.Is(err, errBadVersion) ||
+		errors.Is(err, errFrameLarge)
+}
+
+func (client *Client) setReaderError(err error) {
+	client.readErrMu.Lock()
+	if client.readErr == nil {
+		client.readErr = err
+	}
+	client.readErrMu.Unlock()
+}
+
+func (client *Client) readerError() error {
+	client.readErrMu.RLock()
+	defer client.readErrMu.RUnlock()
+	return client.readErr
+}
+
+func (client *Client) signalReaderDone() {
+	client.readerOnce.Do(func() { close(client.readerDone) })
+}
+
+func (client *Client) acquireCommand(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-client.readerDone:
+		if client.closed.Load() {
+			return ErrClosed
+		}
+		if err := client.readerError(); err != nil {
+			return fmt.Errorf("emulation: read response: %w", err)
+		}
+		return ErrClosed
+	case <-client.commandMu:
+		if err := ctx.Err(); err != nil {
+			client.releaseCommand()
+			return err
+		}
+		return nil
+	}
+}
+
+func (client *Client) releaseCommand() {
+	client.commandMu <- struct{}{}
+}
+
+func (client *Client) drainResponses() {
+	for {
+		select {
+		case <-client.responses:
+		default:
+			return
+		}
 	}
 }
 
@@ -174,12 +253,18 @@ func (client *Client) transact(ctx context.Context, operation opcode, payload []
 	if ctx == nil {
 		return nil, errors.New("emulation: context is nil")
 	}
-	client.commandMu.Lock()
-	defer client.commandMu.Unlock()
+	if err := client.acquireCommand(ctx); err != nil {
+		return nil, err
+	}
+	defer client.releaseCommand()
 
 	if client.closed.Load() {
 		return nil, ErrClosed
 	}
+	if err := client.readerError(); err != nil {
+		return nil, fmt.Errorf("emulation: read response: %w", err)
+	}
+	client.drainResponses()
 	client.sequence++
 	sequence := client.sequence
 	request, err := encodeFrame(requestMagic, sequence, byte(operation), payload)
@@ -198,20 +283,41 @@ func (client *Client) transact(ctx context.Context, operation opcode, payload []
 			return nil, ctx.Err()
 		case <-timer.C:
 			return nil, fmt.Errorf("emulation: command 0x%02X timed out after %s", operation, client.timeout)
-		case result, ok := <-client.responses:
-			if !ok {
-				return nil, ErrClosed
+		case result := <-client.responses:
+			if result.frame.sequence != sequence {
+				continue
 			}
 			if result.err != nil {
 				return nil, fmt.Errorf("emulation: read response: %w", result.err)
-			}
-			if result.frame.sequence != sequence {
-				continue
 			}
 			if status(result.frame.code) != statusOK {
 				return nil, &DeviceError{Status: result.frame.code}
 			}
 			return result.frame.payload, nil
+		case <-client.readerDone:
+			// A device may close immediately after writing its final ACK. Give
+			// an already-buffered response priority over the terminal signal.
+			select {
+			case result := <-client.responses:
+				if result.frame.sequence != sequence {
+					continue
+				}
+				if result.err != nil {
+					return nil, fmt.Errorf("emulation: read response: %w", result.err)
+				}
+				if status(result.frame.code) != statusOK {
+					return nil, &DeviceError{Status: result.frame.code}
+				}
+				return result.frame.payload, nil
+			default:
+			}
+			if client.closed.Load() {
+				return nil, ErrClosed
+			}
+			if err := client.readerError(); err != nil {
+				return nil, fmt.Errorf("emulation: read response: %w", err)
+			}
+			return nil, ErrClosed
 		}
 	}
 }
@@ -292,8 +398,8 @@ func validateKeys(keys []Key) error {
 	nonModifiers := 0
 	seen := make(map[Key]struct{}, len(keys))
 	for _, key := range keys {
-		if key == 0 {
-			return errors.New("emulation: key 0 is not valid")
+		if !isSupportedKey(key) {
+			return fmt.Errorf("emulation: unsupported Arduino key value 0x%02X", byte(key))
 		}
 		if _, exists := seen[key]; exists {
 			return fmt.Errorf("emulation: duplicate key 0x%02X", byte(key))
@@ -309,6 +415,14 @@ func validateKeys(keys []Key) error {
 	return nil
 }
 
+func isSupportedKey(key Key) bool {
+	return key >= 0x20 && key <= 0x7E ||
+		key >= KeyLeftCtrl && key <= KeyRightGUI ||
+		key >= KeyEnter && key <= KeyTab ||
+		key >= KeyCapsLock && key <= KeyKeypadDecimal ||
+		key == KeyMenu || key >= KeyF13 && key <= KeyF24
+}
+
 func isModifier(key Key) bool {
 	return key >= KeyLeftCtrl && key <= KeyRightGUI
 }
@@ -316,12 +430,18 @@ func isModifier(key Key) bool {
 // Press presses a key or chord, waits for the configured tap delay, and then
 // releases the keys in reverse order.
 func (client *Client) Press(ctx context.Context, keys ...Key) (err error) {
+	if ctx == nil {
+		return errors.New("emulation: context is nil")
+	}
+	if err := validateKeys(keys); err != nil {
+		return err
+	}
 	if err = client.KeyDown(ctx, keys...); err != nil {
-		cleanupErr := client.ReleaseKeyboard(context.WithoutCancel(ctx))
+		cleanupErr := client.releaseKeyboardBestEffort(ctx)
 		return errors.Join(err, cleanupErr)
 	}
 	defer func() {
-		releaseErr := client.KeyUp(context.WithoutCancel(ctx), reverseKeys(keys)...)
+		releaseErr := client.keyUpBestEffort(ctx, reverseKeys(keys)...)
 		err = errors.Join(err, releaseErr)
 	}()
 	return waitContext(ctx, client.tapDelay)
@@ -339,6 +459,24 @@ func reverseKeys(keys []Key) []Key {
 // tab, and backspace are sent as explicit key taps. USB HID has no portable
 // Unicode text primitive, so non-ASCII text is rejected.
 func (client *Client) Type(ctx context.Context, text string) error {
+	if ctx == nil {
+		return errors.New("emulation: context is nil")
+	}
+	runes := []rune(text)
+	for index := 0; index < len(runes); index++ {
+		r := runes[index]
+		if r == '\r' && index+1 < len(runes) && runes[index+1] == '\n' {
+			index++
+			continue
+		}
+		if r == '\n' || r == '\r' || r == '\t' || r == '\b' {
+			continue
+		}
+		if r < 0x20 || r > 0x7E {
+			return fmt.Errorf("emulation: cannot type %q: USB HID text is limited to US-ASCII", r)
+		}
+	}
+
 	chunk := make([]byte, 0, maxPayload)
 	flush := func() error {
 		if len(chunk) == 0 {
@@ -349,7 +487,11 @@ func (client *Client) Type(ctx context.Context, text string) error {
 		return err
 	}
 
-	for _, r := range text {
+	for index := 0; index < len(runes); index++ {
+		r := runes[index]
+		if r == '\r' && index+1 < len(runes) && runes[index+1] == '\n' {
+			index++
+		}
 		var special Key
 		switch r {
 		case '\n', '\r':
@@ -359,9 +501,6 @@ func (client *Client) Type(ctx context.Context, text string) error {
 		case '\b':
 			special = KeyBackspace
 		default:
-			if r < 0x20 || r > 0x7E {
-				return fmt.Errorf("emulation: cannot type %q: USB HID text is limited to US-ASCII", r)
-			}
 			chunk = append(chunk, byte(r))
 			if len(chunk) == maxPayload {
 				if err := flush(); err != nil {
@@ -390,6 +529,9 @@ func (client *Client) ReleaseKeyboard(ctx context.Context) error {
 // Move moves the hardware pointer by relative HID units. Large movements are
 // split into valid signed 8-bit HID reports.
 func (client *Client) Move(ctx context.Context, dx, dy int) error {
+	if ctx == nil {
+		return errors.New("emulation: context is nil")
+	}
 	for dx != 0 || dy != 0 {
 		x := clampDelta(dx)
 		y := clampDelta(dy)
@@ -419,6 +561,9 @@ func (client *Client) MoveAbsolute(ctx context.Context, x, y uint16) error {
 // Scroll scrolls vertically and horizontally. Positive vertical values scroll
 // up; positive horizontal values scroll right.
 func (client *Client) Scroll(ctx context.Context, vertical, horizontal int) error {
+	if ctx == nil {
+		return errors.New("emulation: context is nil")
+	}
 	for vertical != 0 || horizontal != 0 {
 		wheel := clampDelta(vertical)
 		pan := clampDelta(horizontal)
@@ -477,12 +622,18 @@ func buttonMask(buttons []Button) (Button, error) {
 
 // Click clicks one or more buttons simultaneously.
 func (client *Client) Click(ctx context.Context, buttons ...Button) (err error) {
+	if ctx == nil {
+		return errors.New("emulation: context is nil")
+	}
+	if _, err := buttonMask(buttons); err != nil {
+		return err
+	}
 	if err = client.ButtonDown(ctx, buttons...); err != nil {
-		cleanupErr := client.ReleaseMouse(context.WithoutCancel(ctx))
+		cleanupErr := client.releaseMouseBestEffort(ctx)
 		return errors.Join(err, cleanupErr)
 	}
 	defer func() {
-		releaseErr := client.ButtonUp(context.WithoutCancel(ctx), buttons...)
+		releaseErr := client.buttonUpBestEffort(ctx, buttons...)
 		err = errors.Join(err, releaseErr)
 	}()
 	return waitContext(ctx, client.tapDelay)
@@ -534,25 +685,65 @@ func (client *Client) CycleUSB(ctx context.Context, detachedFor time.Duration) e
 // Physically unplugging the board is also safe because Windows drops its HID
 // state and the firmware watchdog releases locally held state.
 func (client *Client) Close() error {
-	if client.closed.Load() {
-		return nil
+	if !client.closed.Load() {
+		ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		_, _ = client.transact(ctx, opReleaseAll, nil)
+		cancel()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-	_, _ = client.transact(ctx, opReleaseAll, nil)
-	cancel()
 	return client.shutdown()
 }
 
 func (client *Client) shutdown() error {
-	var closeErr error
 	client.closeOnce.Do(func() {
 		client.closed.Store(true)
-		closeErr = client.transport.Close()
+		client.signalReaderDone()
+		client.closeErr = client.transport.Close()
 	})
-	return closeErr
+	return client.closeErr
+}
+
+func (client *Client) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	base := context.Background()
+	if ctx != nil {
+		base = context.WithoutCancel(ctx)
+	}
+	return context.WithTimeout(base, cleanupTimeout)
+}
+
+func (client *Client) releaseKeyboardBestEffort(ctx context.Context) error {
+	cleanupCtx, cancel := client.cleanupContext(ctx)
+	defer cancel()
+	return client.ReleaseKeyboard(cleanupCtx)
+}
+
+func (client *Client) keyUpBestEffort(ctx context.Context, keys ...Key) error {
+	cleanupCtx, cancel := client.cleanupContext(ctx)
+	defer cancel()
+	return client.KeyUp(cleanupCtx, keys...)
+}
+
+func (client *Client) releaseMouseBestEffort(ctx context.Context) error {
+	cleanupCtx, cancel := client.cleanupContext(ctx)
+	defer cancel()
+	return client.ReleaseMouse(cleanupCtx)
+}
+
+func (client *Client) releaseAllBestEffort(ctx context.Context) error {
+	cleanupCtx, cancel := client.cleanupContext(ctx)
+	defer cancel()
+	return client.ReleaseAll(cleanupCtx)
+}
+
+func (client *Client) buttonUpBestEffort(ctx context.Context, buttons ...Button) error {
+	cleanupCtx, cancel := client.cleanupContext(ctx)
+	defer cancel()
+	return client.ButtonUp(cleanupCtx, buttons...)
 }
 
 func waitContext(ctx context.Context, delay time.Duration) error {
+	if ctx == nil {
+		return errors.New("emulation: context is nil")
+	}
 	if delay == 0 {
 		return nil
 	}

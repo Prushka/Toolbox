@@ -9,6 +9,7 @@ constexpr uint8_t kResponseMagic = 0x5A;
 constexpr uint8_t kProtocolVersion = 1;
 constexpr uint8_t kMaximumPayload = 64;
 constexpr uint32_t kWatchdogMilliseconds = 30000UL;
+constexpr uint16_t kPartialFrameTimeoutMilliseconds = 250;
 
 enum Command : uint8_t {
   kPing = 0x01,
@@ -42,8 +43,10 @@ constexpr uint16_t kCapabilities =
     (1 << 3) |  // horizontal wheel
     (1 << 4);   // USB detach/attach
 
-// Report 3 is an absolute five-button pointer. Report 4 is a relative
-// five-button pointer with vertical wheel and horizontal AC Pan.
+// Report 3 retains the Windows-compatible five-button descriptor shape, but
+// its button byte is always zero. Report 4 is the only collection that asserts
+// buttons and also provides relative movement and two wheels. This prevents
+// split button state between top-level collections.
 const uint8_t kToolboxMouseDescriptor[] PROGMEM = {
     0x05, 0x01,        // Usage Page (Generic Desktop)
     0x09, 0x02,        // Usage (Mouse)
@@ -141,23 +144,39 @@ class ToolboxMouse_ {
     if (x > 32767 || y > 32767) {
       return false;
     }
-    const AbsoluteMouseReport report = {buttons_, x, y};
+    // Absolute reports never assert buttons; report 4 owns all button state.
+    const AbsoluteMouseReport report = {0, x, y};
     return HID().SendReport(3, &report, sizeof(report)) >= 0;
   }
 
   bool press(uint8_t buttons) {
+    const uint8_t previous = buttons_;
     buttons_ |= buttons;
-    return move(0, 0, 0, 0);
+    if (move(0, 0, 0, 0)) {
+      return true;
+    }
+    buttons_ = previous;
+    return false;
   }
 
   bool release(uint8_t buttons) {
+    const uint8_t previous = buttons_;
     buttons_ &= ~buttons;
-    return move(0, 0, 0, 0);
+    if (move(0, 0, 0, 0)) {
+      return true;
+    }
+    buttons_ = previous;
+    return false;
   }
 
-  void releaseAll() {
+  bool releaseAll() {
+    const uint8_t previous = buttons_;
     buttons_ = 0;
-    move(0, 0, 0, 0);
+    if (move(0, 0, 0, 0)) {
+      return true;
+    }
+    buttons_ = previous;
+    return false;
   }
 
  private:
@@ -169,6 +188,8 @@ uint8_t receiveBuffer[6 + kMaximumPayload];
 uint8_t receiveLength = 0;
 uint8_t expectedLength = 0;
 uint32_t lastValidCommandAt = 0;
+uint32_t lastFrameByteAt = 0;
+bool commandPortWasOpen = false;
 
 uint8_t crc8(const uint8_t* data, uint8_t length) {
   uint8_t crc = 0;
@@ -182,9 +203,39 @@ uint8_t crc8(const uint8_t* data, uint8_t length) {
   return crc;
 }
 
-void releaseAll() {
+bool releaseAll() {
   Keyboard.releaseAll();
-  ToolboxMouse.releaseAll();
+  return ToolboxMouse.releaseAll();
+}
+
+bool isSupportedKey(uint8_t key) {
+  return (key >= 0x20 && key <= 0x7E) ||
+         (key >= 0x80 && key <= 0x87) ||
+         (key >= 0xB0 && key <= 0xB3) ||
+         (key >= 0xC1 && key <= 0xEB) || key == 0xED ||
+         (key >= 0xF0 && key <= 0xFB);
+}
+
+bool isModifierKey(uint8_t key) {
+  return key >= 0x80 && key <= 0x87;
+}
+
+bool validateKeyPayload(const uint8_t* payload, uint8_t payloadLength) {
+  uint8_t nonModifiers = 0;
+  for (uint8_t index = 0; index < payloadLength; ++index) {
+    if (!isSupportedKey(payload[index])) {
+      return false;
+    }
+    for (uint8_t previous = 0; previous < index; ++previous) {
+      if (payload[previous] == payload[index]) {
+        return false;
+      }
+    }
+    if (!isModifierKey(payload[index]) && ++nonModifiers > 6) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void sendResponse(uint8_t sequence, Status status, const uint8_t* payload,
@@ -215,7 +266,7 @@ Status runCommand(uint8_t command, const uint8_t* payload,
         return kBadPayload;
       }
       response[0] = 1;  // firmware major
-      response[1] = 0;  // firmware minor
+      response[1] = 1;  // firmware minor
       response[2] = kProtocolVersion;
       response[3] = lowByte(kCapabilities);
       response[4] = highByte(kCapabilities);
@@ -225,7 +276,7 @@ Status runCommand(uint8_t command, const uint8_t* payload,
       return kOK;
 
     case kKeyDown:
-      if (payloadLength == 0) {
+      if (payloadLength == 0 || !validateKeyPayload(payload, payloadLength)) {
         return kBadPayload;
       }
       for (uint8_t index = 0; index < payloadLength; ++index) {
@@ -237,7 +288,7 @@ Status runCommand(uint8_t command, const uint8_t* payload,
       return kOK;
 
     case kKeyUp:
-      if (payloadLength == 0) {
+      if (payloadLength == 0 || !validateKeyPayload(payload, payloadLength)) {
         return kBadPayload;
       }
       for (uint8_t index = 0; index < payloadLength; ++index) {
@@ -257,10 +308,14 @@ Status runCommand(uint8_t command, const uint8_t* payload,
         return kBadPayload;
       }
       for (uint8_t index = 0; index < payloadLength; ++index) {
-        if (payload[index] < 0x20 || payload[index] > 0x7E ||
-            Keyboard.write(payload[index]) == 0) {
-          Keyboard.releaseAll();
+        if (payload[index] < 0x20 || payload[index] > 0x7E) {
           return kBadPayload;
+        }
+      }
+      for (uint8_t index = 0; index < payloadLength; ++index) {
+        if (Keyboard.write(payload[index]) == 0) {
+          Keyboard.releaseAll();
+          return kHIDFailure;
         }
       }
       return kOK;
@@ -303,15 +358,13 @@ Status runCommand(uint8_t command, const uint8_t* payload,
       if (payloadLength != 0) {
         return kBadPayload;
       }
-      ToolboxMouse.releaseAll();
-      return kOK;
+      return ToolboxMouse.releaseAll() ? kOK : kHIDFailure;
 
     case kReleaseAll:
       if (payloadLength != 0) {
         return kBadPayload;
       }
-      releaseAll();
-      return kOK;
+      return releaseAll() ? kOK : kHIDFailure;
 
     case kCycleUSB:
       if (payloadLength != 2) {
@@ -325,8 +378,7 @@ Status runCommand(uint8_t command, const uint8_t* payload,
           return kBadPayload;
         }
       }
-      releaseAll();
-      return kOK;
+      return releaseAll() ? kOK : kHIDFailure;
 
     default:
       return kUnknownCommand;
@@ -372,12 +424,19 @@ void processFrame() {
 }
 
 void readCommands() {
+  const uint32_t now = millis();
+  if (receiveLength != 0 &&
+      now - lastFrameByteAt >= kPartialFrameTimeoutMilliseconds) {
+    receiveLength = 0;
+    expectedLength = 0;
+  }
   while (Serial.available() > 0) {
     const uint8_t value = static_cast<uint8_t>(Serial.read());
     if (receiveLength == 0 && value != kRequestMagic) {
       continue;
     }
     receiveBuffer[receiveLength++] = value;
+    lastFrameByteAt = millis();
 
     if (receiveLength == 5) {
       if (receiveBuffer[4] > kMaximumPayload) {
@@ -406,6 +465,13 @@ void setup() {
 }
 
 void loop() {
+  const bool commandPortIsOpen = Serial.dtr() || Serial.rts();
+  if (commandPortWasOpen && !commandPortIsOpen) {
+    releaseAll();
+    receiveLength = 0;
+    expectedLength = 0;
+  }
+  commandPortWasOpen = commandPortIsOpen;
   readCommands();
   const uint32_t now = millis();
   if (now - lastValidCommandAt >= kWatchdogMilliseconds) {

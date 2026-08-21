@@ -12,14 +12,20 @@ type Action func(context.Context, *Client) error
 
 // Do executes actions in order and stops at the first error.
 func (client *Client) Do(ctx context.Context, actions ...Action) error {
+	if ctx == nil {
+		return errors.New("emulation: context is nil")
+	}
+	if client == nil {
+		return errors.New("emulation: client is nil")
+	}
 	for index, action := range actions {
 		if action == nil {
 			err := fmt.Errorf("emulation: action %d is nil", index)
-			cleanupErr := client.ReleaseAll(context.WithoutCancel(ctx))
+			cleanupErr := client.releaseAllBestEffort(ctx)
 			return errors.Join(err, cleanupErr)
 		}
 		if err := action(ctx, client); err != nil {
-			cleanupErr := client.ReleaseAll(context.WithoutCancel(ctx))
+			cleanupErr := client.releaseAllBestEffort(ctx)
 			return errors.Join(fmt.Errorf("emulation: action %d: %w", index, err), cleanupErr)
 		}
 	}

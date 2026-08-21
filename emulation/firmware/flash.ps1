@@ -42,8 +42,12 @@ if (-not $CompileOnly -and -not $Port) {
 if ($LASTEXITCODE -ne 0) { throw 'arduino-cli core update-index failed.' }
 & $ArduinoCLI core install arduino:avr
 if ($LASTEXITCODE -ne 0) { throw 'arduino-cli core install failed.' }
-& $ArduinoCLI lib install Keyboard Mouse
-if ($LASTEXITCODE -ne 0) { throw 'arduino-cli Keyboard/Mouse library install failed.' }
+& $ArduinoCLI core upgrade arduino:avr
+if ($LASTEXITCODE -ne 0) { throw 'arduino-cli core upgrade failed.' }
+& $ArduinoCLI lib install Keyboard
+if ($LASTEXITCODE -ne 0) { throw 'arduino-cli Keyboard library install failed.' }
+& $ArduinoCLI lib upgrade Keyboard
+if ($LASTEXITCODE -ne 0) { throw 'arduino-cli Keyboard library upgrade failed.' }
 
 $arguments = @(
     'compile',

@@ -13,12 +13,25 @@ The firmware is a composite USB device with three functions:
 
 USB VID/PID belongs to the whole physical USB device, not to each interface.
 One Leonardo therefore cannot expose a different VID/PID for its keyboard and
-mouse interfaces. Both Logitech-compatible HID interfaces use the real
-`046D:C223` pair already named in `references/keyboard.ino`. The Linux USB ID
-database identifies that pair as `Logitech, Inc. G11/G15 Keyboard / USB Hub`.
-Windows still distinguishes this board by its physical USB path/container.
-Avoid connecting a real `046D:C223` device at the same time if software selects
-devices by VID/PID alone.
+mouse interfaces. Both HID interfaces use the real `046D:C223` pair already
+named in `references/keyboard.ino`. The Linux USB ID database identifies that
+pair as `Logitech, Inc. G11/G15 Keyboard / USB Hub`. That VID belongs to
+Logitech; this firmware is not a genuine Logitech device and the identifier is
+suitable only for controlled compatibility testing. Windows still
+distinguishes the board by its descriptors, CDC interface, physical USB path,
+and container. Avoid connecting a real `046D:C223` device at the same time if
+software selects devices by VID/PID alone.
+
+This design is not a stealth or anti-detection mechanism. A single Leonardo
+cannot accurately reproduce two physical Logitech products, and its composite
+descriptor intentionally retains a CDC command channel. Software that inspects
+USB topology or descriptors can distinguish it. The library does not include
+anti-cheat, endpoint-monitoring, or security-control bypasses.
+
+The CDC port is a local trust boundary, not an authenticated channel. CRC-8
+detects accidental transport corruption but does not authenticate commands.
+Run command-producing software only on a trusted Windows account and do not
+expose the serial stream through a network bridge without adding authentication.
 
 The official Leonardo documentation confirms that its ATmega32u4 can appear as
 a keyboard and mouse alongside a virtual CDC serial port:
@@ -30,10 +43,20 @@ https://github.com/usbids/usbids/blob/master/usb.ids
 ## Firmware safety
 
 Requests are versioned, length-delimited, CRC-8 protected, sequenced, and
-acknowledged. Payloads are capped at 64 bytes. `Close`, `CycleUSB`, malformed
+acknowledged. Payloads are capped at 64 bytes, abandoned partial frames expire,
+and corrupt responses can be resynchronized. `Close`, `CycleUSB`, malformed
 multi-key reports, and a 30-second command watchdog release all held keys and
-buttons. Physical unplug is safe; Windows tears down the HID device and the
-board starts with an all-released report on reconnect.
+buttons. Cleanup calls have bounded timeouts so cancellation or disconnects do
+not hang the caller. Physical unplug is safe; Windows tears down the HID device
+and the board starts with an all-released report on reconnect.
+
+Dropping the CDC port's DTR/RTS control lines also releases input immediately;
+the watchdog remains a fallback for a host that freezes without closing USB.
+
+Only the relative mouse collection asserts button state. The absolute report
+keeps a Windows-compatible descriptor shape but always sends an all-released
+button byte, preventing a button from becoming stuck in one of Windows'
+independently tracked top-level HID collections.
 
 Absolute pointer reports target the Windows primary display. Relative reports
 remain subject to Windows pointer speed/acceleration. Text is intentionally
@@ -51,10 +74,9 @@ ignored project-local `.tools` directory:
 .\emulation\firmware\flash.ps1
 ```
 
-`flash.ps1` installs the latest official `arduino:avr`, `Keyboard`, and `Mouse`
-packages, applies the Logitech USB properties as build arguments, compiles,
-and uploads. It never
-edits the installed AVR core. During upload the Leonardo briefly enters its
+`flash.ps1` installs or upgrades to the latest official `arduino:avr` and
+`Keyboard` packages, applies the Logitech USB properties as build arguments, compiles,
+and uploads. It does not patch the installed AVR core. During upload the Leonardo briefly enters its
 Arduino bootloader identity; COM3 can disappear and return as Windows
 re-enumerates it.
 

@@ -54,6 +54,11 @@ try {
 }
 finally {
     if (Test-Path -LiteralPath $temporaryDirectory) {
-        Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force
+        $resolvedTemporaryDirectory = (Resolve-Path -LiteralPath $temporaryDirectory).Path
+        $temporaryRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+        if (-not $resolvedTemporaryDirectory.StartsWith($temporaryRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove unexpected temporary path: $resolvedTemporaryDirectory"
+        }
+        Remove-Item -LiteralPath $resolvedTemporaryDirectory -Recurse -Force
     }
 }
