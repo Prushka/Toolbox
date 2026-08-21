@@ -6,15 +6,21 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
 	"github.com/Prushka/Toolbox/cmd/hid/internal/example"
 	"github.com/Prushka/Toolbox/hid"
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal().Err(err).Msg("HID status example failed")
+	}
+}
+
+func run() (err error) {
 	portName := flag.String("port", "", "Arduino Leonardo CDC port (auto-detected when empty)")
 	flag.Parse()
 
@@ -22,16 +28,22 @@ func main() {
 	defer cancel()
 	device, port, err := example.Open(ctx, *portName)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	defer example.Close(device)
+	defer func() {
+		if closeErr := example.Close(device); err == nil {
+			err = closeErr
+		} else if closeErr != nil {
+			log.Warn().Err(closeErr).Msg("HID device cleanup failed")
+		}
+	}()
 
 	if err = device.Ping(ctx); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	info, err := device.Info(ctx)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("port: %s\n", port.Name)
 	if port.VID != "" {
@@ -43,6 +55,7 @@ func main() {
 		info.ProtocolVersion, info.MaximumPayload, info.WatchdogTimeout)
 	fmt.Printf("capabilities: 0x%04X (%s)\n", info.Capabilities,
 		strings.Join(capabilityNames(info.Capabilities), ", "))
+	return nil
 }
 
 func capabilityNames(capabilities hid.Capability) []string {

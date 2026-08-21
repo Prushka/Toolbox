@@ -318,7 +318,8 @@ the scripts do not overwrite Windows system files.
 
 Each subdirectory under `cmd/hid` is an independent command. The status
 example performs only discovery, Info, and health checks. Examples that send
-real input or cycle USB require `-run`:
+real input or cycle USB require `-run`. The commands use Zerolog for structured
+errors and warnings, while successful command results remain plain stdout:
 
 ```powershell
 go run .\cmd\hid\status

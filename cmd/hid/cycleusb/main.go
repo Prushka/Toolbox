@@ -6,52 +6,65 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
 	"github.com/Prushka/Toolbox/cmd/hid/internal/example"
 	"github.com/Prushka/Toolbox/hid"
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal().Err(err).Msg("HID USB cycle example failed")
+	}
+}
+
+func run() (err error) {
 	portName := flag.String("port", "", "Arduino Leonardo CDC port (auto-detected when empty)")
 	run := flag.Bool("run", false, "detach and reattach the USB device")
 	detachedFor := flag.Duration("duration", time.Second, "USB detached duration (250ms to 30s)")
 	waitFor := flag.Duration("wait", 20*time.Second, "maximum re-enumeration wait")
 	flag.Parse()
 	if !*run {
-		log.Fatal("USB cycling is disabled; pass -run to execute the example")
+		return fmt.Errorf("USB cycling is disabled; pass -run to execute the example")
 	}
 	if *detachedFor < 250*time.Millisecond || *detachedFor > 30*time.Second {
-		log.Fatal("-duration must be between 250ms and 30s")
+		return fmt.Errorf("-duration must be between 250ms and 30s")
 	}
 	if *waitFor <= 0 {
-		log.Fatal("-wait must be positive")
+		return fmt.Errorf("-wait must be positive")
 	}
 
 	commandCtx, cancelCommand := context.WithTimeout(context.Background(), 10*time.Second)
 	device, port, err := example.Open(commandCtx, *portName)
 	if err != nil {
 		cancelCommand()
-		log.Fatal(err)
+		return err
 	}
-	defer example.Close(device)
+	defer func() {
+		if closeErr := example.Close(device); err == nil {
+			err = closeErr
+		} else if closeErr != nil {
+			log.Warn().Err(closeErr).Msg("HID device cleanup failed")
+		}
+	}()
 	allowRenamedPort := canAcceptRenamedPort(port)
 	fmt.Printf("cycling %s for %s\n", port.Name, *detachedFor)
 	err = device.CycleUSB(commandCtx, *detachedFor)
 	cancelCommand()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	waitCtx, cancelWait := context.WithTimeout(context.Background(), *waitFor)
 	defer cancelWait()
 	reconnected, err := waitForPort(waitCtx, port, allowRenamedPort)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("device re-enumerated on %s\n", reconnected.Name)
+	return nil
 }
 
 func canAcceptRenamedPort(target hid.Port) bool {

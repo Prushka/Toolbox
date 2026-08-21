@@ -11,12 +11,12 @@ import (
 
 	"github.com/Prushka/Toolbox/automation"
 	"github.com/Prushka/Toolbox/cmd/automation/internal/example"
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "image-search:", err)
-		os.Exit(1)
+		log.Fatal().Err(err).Msg("image-search failed")
 	}
 }
 

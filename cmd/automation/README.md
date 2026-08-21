@@ -14,7 +14,8 @@ go run ./cmd/automation/windows -h
 
 The examples use documented `automation` APIs only. They do not send keyboard
 or mouse input. On non-Windows builds, Windows-specific examples return
-`automation.ErrUnsupported`.
+`automation.ErrUnsupported`. Normal results are printed to stdout; operational
+failures are timestamped Zerolog JSON events on stderr.
 
 ## Commands
 
@@ -26,7 +27,7 @@ or mouse input. On non-Windows builds, Windows-specific examples return
 | `windows` | Window enumeration, selectors, geometry, state, and optional process paths | Process-path lookup opens query-limited handles. |
 | `app-toggle` | Toggle an existing window or start a command when no match exists | May minimize/activate a window or start a process. |
 | `displays` | Virtual desktop, monitor work areas, current primary mode, and available modes | None. |
-| `settings` | Atomic INI read/write and synchronized timestamped logging | Writes only when `-write` is supplied; appends to a log. |
+| `settings` | Atomic INI read/write and synchronized structured JSON logging | Writes only when `-write` is supplied; appends JSON lines to a log. |
 
 ## Shared window selectors
 
@@ -208,7 +209,7 @@ that system-wide choice explicitly.
 
 ## Settings and logging
 
-Read an INI value and append the result to a timestamped log:
+Read an INI value and append the result to a timestamped JSON log:
 
 ```powershell
 go run ./cmd/automation/settings `
@@ -232,6 +233,8 @@ go run ./cmd/automation/settings `
 
 The underlying helpers serialize same-process read-modify-write access to the
 same normalized path and use temporary-file replacement to avoid partial files.
+The log contains one Zerolog JSON object per line, including `component`,
+`path`, `section`, `key`, and `value` fields.
 
 ## Verification
 

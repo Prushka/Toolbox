@@ -6,14 +6,20 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/Prushka/Toolbox/cmd/hid/internal/example"
 	"github.com/Prushka/Toolbox/hid"
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal().Err(err).Msg("HID keyboard example failed")
+	}
+}
+
+func run() (err error) {
 	portName := flag.String("port", "", "Arduino Leonardo CDC port (auto-detected when empty)")
 	run := flag.Bool("run", false, "send the keyboard demonstration")
 	text := flag.String("text", "Typed through the Arduino Leonardo.", "US-ASCII text to type")
@@ -21,19 +27,25 @@ func main() {
 	tapDelay := flag.Duration("tap-delay", 20*time.Millisecond, "key hold time")
 	flag.Parse()
 	if !*run {
-		log.Fatal("keyboard input is disabled; pass -run to execute the example")
+		return fmt.Errorf("keyboard input is disabled; pass -run to execute the example")
 	}
 	if *startDelay < 0 {
-		log.Fatal("-start-delay cannot be negative")
+		return fmt.Errorf("-start-delay cannot be negative")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	device, port, err := example.Open(ctx, *portName, hid.WithTapDelay(*tapDelay))
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	defer example.Close(device)
+	defer func() {
+		if closeErr := example.Close(device); err == nil {
+			err = closeErr
+		} else if closeErr != nil {
+			log.Warn().Err(closeErr).Msg("HID device cleanup failed")
+		}
+	}()
 
 	err = device.Do(ctx,
 		hid.Pause(*startDelay),
@@ -50,7 +62,8 @@ func main() {
 		hid.TapKeys(hid.KeyEnter),
 	)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("keyboard example completed on %s\n", port.Name)
+	return nil
 }

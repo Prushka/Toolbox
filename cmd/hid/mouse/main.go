@@ -6,14 +6,20 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/Prushka/Toolbox/cmd/hid/internal/example"
 	"github.com/Prushka/Toolbox/hid"
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal().Err(err).Msg("HID mouse example failed")
+	}
+}
+
+func run() (err error) {
 	portName := flag.String("port", "", "Arduino Leonardo CDC port (auto-detected when empty)")
 	run := flag.Bool("run", false, "send the mouse demonstration")
 	dx := flag.Int("dx", 80, "relative horizontal movement")
@@ -27,69 +33,77 @@ func main() {
 	pause := flag.Duration("pause", 300*time.Millisecond, "pause between movement steps")
 	flag.Parse()
 	if !*run {
-		log.Fatal("mouse input is disabled; pass -run to execute the example")
+		return fmt.Errorf("mouse input is disabled; pass -run to execute the example")
 	}
 	if (*x >= 0) != (*y >= 0) {
-		log.Fatal("-x and -y must be provided together")
+		return fmt.Errorf("-x and -y must be provided together")
 	}
 	if *pause < 0 {
-		log.Fatal("-pause cannot be negative")
+		return fmt.Errorf("-pause cannot be negative")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	device, port, err := example.Open(ctx, *portName)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	defer example.Close(device)
+	defer func() {
+		if closeErr := example.Close(device); err == nil {
+			err = closeErr
+		} else if closeErr != nil {
+			log.Warn().Err(closeErr).Msg("HID device cleanup failed")
+		}
+	}()
 
 	startX, startY, err := hid.CursorPosition()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("starting cursor position: (%d, %d)\n", startX, startY)
 
 	if err = device.Move(ctx, *dx, *dy); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err = wait(ctx, *pause); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err = device.Move(ctx, -*dx, -*dy); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if *x >= 0 {
 		if err = device.MoveTo(ctx, *x, *y); err != nil {
-			log.Fatal(err)
+			return err
 		}
 		if err = wait(ctx, *pause); err != nil {
-			log.Fatal(err)
+			return err
 		}
 		if err = device.MoveTo(ctx, startX, startY); err != nil {
-			log.Printf("could not restore (%d, %d) with primary-display absolute movement: %v", startX, startY, err)
+			log.Warn().Err(err).Int("x", startX).Int("y", startY).
+				Msg("could not restore cursor with primary-display absolute movement")
 		}
 	}
 	if *wheel != 0 || *pan != 0 {
 		if err = device.Scroll(ctx, *wheel, *pan); err != nil {
-			log.Fatal(err)
+			return err
 		}
 	}
 	if *click {
 		if err = device.Click(ctx, hid.ButtonLeft); err != nil {
-			log.Fatal(err)
+			return err
 		}
 	}
 	if *doubleClick {
 		if err = device.DoubleClick(ctx, 100*time.Millisecond); err != nil {
-			log.Fatal(err)
+			return err
 		}
 	}
 	endX, endY, err := hid.CursorPosition()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("mouse example completed on %s; final cursor position: (%d, %d)\n", port.Name, endX, endY)
+	return nil
 }
 
 func wait(ctx context.Context, delay time.Duration) error {

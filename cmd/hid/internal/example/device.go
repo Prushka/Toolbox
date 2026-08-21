@@ -4,7 +4,6 @@ package example
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/Prushka/Toolbox/hid"
@@ -62,9 +61,10 @@ func Open(ctx context.Context, requested string, options ...hid.Option) (*hid.Cl
 	return device, port, nil
 }
 
-// Close reports cleanup failures without hiding the example's primary result.
-func Close(device *hid.Client) {
-	if err := device.Close(); err != nil {
-		log.Printf("close device: %v", err)
+// Close releases input and closes the command port.
+func Close(device *hid.Client) error {
+	if device == nil {
+		return nil
 	}
+	return device.Close()
 }

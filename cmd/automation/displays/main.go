@@ -4,15 +4,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"os"
 
 	"github.com/Prushka/Toolbox/automation"
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "displays:", err)
-		os.Exit(1)
+		log.Fatal().Err(err).Msg("displays failed")
 	}
 }
 

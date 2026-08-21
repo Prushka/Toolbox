@@ -3,15 +3,14 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
 
 	"github.com/Prushka/Toolbox/automation"
+	"github.com/rs/zerolog/log"
 )
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "settings:", err)
-		os.Exit(1)
+		log.Fatal().Err(err).Msg("settings failed")
 	}
 }
 
@@ -43,10 +42,13 @@ func run() (err error) {
 			err = closeErr
 		}
 	}()
-	logger.SetPrefix("settings")
-	if err := logger.PrintfErr("%s [%s] %s=%s", *iniPath, *section, *key, got); err != nil {
-		return err
-	}
+	logger.Info().
+		Str("component", "settings").
+		Str("path", *iniPath).
+		Str("section", *section).
+		Str("key", *key).
+		Str("value", got).
+		Msg("INI value")
 	fmt.Printf("[%s] %s=%s (logged to %s)\n", *section, *key, got, *logPath)
 	return nil
 }

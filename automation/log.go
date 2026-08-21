@@ -1,89 +1,95 @@
 package automation
 
 import (
-	"fmt"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
+
+	"github.com/rs/zerolog"
 )
 
-// Logger is a concurrency-safe timestamped append logger.
-type Logger struct {
-	mu     sync.Mutex
-	out    io.Writer
-	file   *os.File
-	prefix string
+// NewLogger returns a structured, timestamped Zerolog logger. SyncWriter makes
+// logging safe even when the supplied writer is not concurrency-safe.
+func NewLogger(writer io.Writer) zerolog.Logger {
+	if writer == nil {
+		return zerolog.Nop()
+	}
+	return zerolog.New(zerolog.SyncWriter(writer)).With().Timestamp().Logger()
 }
 
-func NewLogger(w io.Writer) *Logger { return &Logger{out: w} }
-func OpenLogger(path string) (*Logger, error) {
+// FileLogger owns an append-opened log file and embeds its Zerolog logger.
+// Call Close after all goroutines using the logger have stopped.
+type FileLogger struct {
+	zerolog.Logger
+	file      *lockedFile
+	closeOnce sync.Once
+	closeErr  error
+}
+
+type lockedFile struct {
+	mu       sync.Mutex
+	file     *os.File
+	writeErr error
+}
+
+func (file *lockedFile) Write(payload []byte) (int, error) {
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	if file.file == nil {
+		return 0, os.ErrClosed
+	}
+	written, err := file.file.Write(payload)
+	if err != nil {
+		file.writeErr = errors.Join(file.writeErr, err)
+	} else if written != len(payload) {
+		err = io.ErrShortWrite
+		file.writeErr = errors.Join(file.writeErr, err)
+	}
+	return written, err
+}
+
+func (file *lockedFile) Close() error {
+	file.mu.Lock()
+	defer file.mu.Unlock()
+	if file.file == nil {
+		return nil
+	}
+	syncErr := file.file.Sync()
+	closeErr := file.file.Close()
+	writeErr := file.writeErr
+	file.file = nil
+	return errors.Join(writeErr, syncErr, closeErr)
+}
+
+// OpenLogger opens path for structured JSON logging. Every event includes a
+// timestamp and is appended with Zerolog's allocation-conscious JSON encoder.
+func OpenLogger(path string) (*FileLogger, error) {
 	if path == "" {
 		return nil, ErrInvalidArgument
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, err
 	}
-	f, e := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if e != nil {
-		return nil, e
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, err
 	}
-	return &Logger{out: f, file: f}, nil
+	locked := &lockedFile{file: file}
+	return &FileLogger{
+		Logger: zerolog.New(locked).With().Timestamp().Logger(),
+		file:   locked,
+	}, nil
 }
 
-// SetPrefix changes the prefix used by subsequent log entries.
-func (l *Logger) SetPrefix(prefix string) {
-	if l == nil {
-		return
-	}
-	l.mu.Lock()
-	l.prefix = prefix
-	l.mu.Unlock()
-}
-
-// Prefix returns the current log prefix.
-func (l *Logger) Prefix() string {
-	if l == nil {
-		return ""
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.prefix
-}
-
-func (l *Logger) Close() error {
-	if l == nil {
+// Close flushes the append file and closes it. It is idempotent.
+func (logger *FileLogger) Close() error {
+	if logger == nil || logger.file == nil {
 		return nil
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.file != nil {
-		e := l.file.Close()
-		l.file = nil
-		l.out = nil
-		return e
-	}
-	return nil
-}
-func (l *Logger) Printf(format string, args ...any) {
-	_ = l.PrintfErr(format, args...)
-}
-
-// PrintfErr writes one complete log entry and reports writer failures.
-func (l *Logger) PrintfErr(format string, args ...any) error {
-	if l == nil {
-		return nil
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.out == nil {
-		return nil
-	}
-	prefix := l.prefix
-	if prefix != "" {
-		prefix += " "
-	}
-	_, err := fmt.Fprintf(l.out, "[%s] %s%s\n", time.Now().Format("15:04:05"), prefix, fmt.Sprintf(format, args...))
-	return err
+	logger.closeOnce.Do(func() {
+		logger.closeErr = logger.file.Close()
+	})
+	return logger.closeErr
 }

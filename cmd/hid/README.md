@@ -2,7 +2,10 @@
 
 Each subdirectory is an independent Windows command. Shared board discovery,
 opening, and cleanup live in `internal/example`, leaving each `main.go` focused
-on the API being demonstrated.
+on the API being demonstrated. Normal results are printed to stdout;
+operational failures and cleanup warnings are timestamped Zerolog JSON events
+on stderr. Commands return from their workflow before fatal logging so deferred
+HID cleanup always runs.
 
 | Example | Purpose | Generates input by default |
 | --- | --- | --- |
