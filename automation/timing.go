@@ -8,20 +8,7 @@ import (
 	"time"
 )
 
-var processStarted = time.Now()
 var jitterRandMu sync.Mutex
-
-// TickCount returns milliseconds elapsed since this package was initialized,
-// equivalent to the monotonic portion of AHK's A_TickCount for process-local
-// timeouts.
-func TickCount() int64              { return time.Since(processStarted).Milliseconds() }
-func ElapsedSince(last int64) int64 { return TickCount() - last }
-func FormatTimestamp(t time.Time, layout string) string {
-	if layout == "" {
-		layout = "20060102-150405"
-	}
-	return t.Format(layout)
-}
 
 // Sleep is a context-aware replacement for AHK Sleep. It returns nil when the
 // duration elapsed, or ctx.Err when canceled.

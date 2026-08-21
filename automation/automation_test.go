@@ -3,18 +3,11 @@ package automation
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"image"
 	"image/color"
 	"image/png"
-	"io"
 	"math/rand"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -170,47 +163,6 @@ func TestTemplateOwnershipAndLimits(t *testing.T) {
 	}
 }
 
-func TestINIAndLogger(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.ini")
-	if e := WriteINI(path, "settings", "logging", "true"); e != nil {
-		t.Fatal(e)
-	}
-	if got, e := ReadINI(path, "SETTINGS", "LOGGING", "false"); e != nil || got != "true" {
-		t.Fatalf("read=%q,%v", got, e)
-	}
-	if e := WriteINI(path, "settings", "difficulty", "hard"); e != nil {
-		t.Fatal(e)
-	}
-	if got, e := ReadINI(path, "settings", "logging", "false"); e != nil || got != "true" {
-		t.Fatalf("replacement lost prior key: %q,%v", got, e)
-	}
-	var out bytes.Buffer
-	l := NewLogger(&out).With().Str("component", "test").Logger()
-	l.Info().Int("value", 3).Msg("hello")
-	var event map[string]any
-	if err := json.Unmarshal(out.Bytes(), &event); err != nil {
-		t.Fatalf("log is not JSON: %v (%q)", err, out.String())
-	}
-	if event["component"] != "test" || event["value"] != float64(3) || event["message"] != "hello" {
-		t.Fatalf("log=%v", event)
-	}
-	if err := WriteINI(path, "bad\nsection", "key", "value"); !errors.Is(err, ErrInvalidArgument) {
-		t.Fatalf("invalid section error=%v", err)
-	}
-	if err := WriteINI(path, "settings", "key", "line1\nline2"); !errors.Is(err, ErrInvalidArgument) {
-		t.Fatalf("invalid value error=%v", err)
-	}
-	large := strings.Repeat("x", 128*1024)
-	if err := WriteINI(path, "settings", "large", large); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := ReadINI(path, "settings", "large", ""); err != nil || got != large {
-		t.Fatalf("large INI value length=%d, error=%v", len(got), err)
-	}
-	_ = os.Remove(path)
-}
-
 func TestWaitSleep(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -246,138 +198,6 @@ func TestWaitSleep(t *testing.T) {
 	}
 	if e := JitterSleep(context.Background(), time.Duration(1<<63-1), 0, 1, r); !errors.Is(e, ErrInvalidArgument) {
 		t.Fatalf("duration overflow=%v", e)
-	}
-}
-
-func TestConcurrentINIAndLogger(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "concurrent.ini")
-	const n = 24
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		i := i
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			key := fmt.Sprintf("key-%d", i)
-			if err := WriteINI(path, "values", key, strconv.Itoa(i)); err != nil {
-				t.Errorf("WriteINI(%s): %v", key, err)
-			}
-			_, _ = ReadINI(path, "values", key, "")
-		}()
-	}
-	wg.Wait()
-	for i := 0; i < n; i++ {
-		got, err := ReadINI(path, "values", fmt.Sprintf("key-%d", i), "")
-		if err != nil || got != strconv.Itoa(i) {
-			t.Fatalf("key-%d=%q,%v", i, got, err)
-		}
-	}
-	ini := NewINI()
-	for i := 0; i < n; i++ {
-		i := i
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ini.Set("values", fmt.Sprintf("key-%d", i), strconv.Itoa(i))
-			_ = ini.Get("values", fmt.Sprintf("key-%d", i), "")
-			if err := ini.Save(path); err != nil {
-				t.Errorf("INI.Save: %v", err)
-			}
-		}()
-	}
-	wg.Wait()
-	var out bytes.Buffer
-	l := NewLogger(&out)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			l.Info().Int("index", i).Msg("message")
-		}(i)
-	}
-	wg.Wait()
-	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != n {
-		t.Fatalf("decoded %d events, want %d", len(lines), n)
-	}
-	seen := make(map[int]bool, n)
-	for _, line := range lines {
-		var event struct {
-			Index   int    `json:"index"`
-			Message string `json:"message"`
-		}
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			t.Fatalf("decode log event: %v", err)
-		}
-		if event.Message != "message" || event.Index < 0 || event.Index >= n || seen[event.Index] {
-			t.Fatalf("unexpected log event: %+v", event)
-		}
-		seen[event.Index] = true
-	}
-	if len(seen) != n {
-		t.Fatalf("decoded %d distinct events, want %d", len(seen), n)
-	}
-}
-
-func TestFileLogger(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "logs", "automation.jsonl")
-	logger, err := OpenLogger(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const eventCount = 32
-	var wg sync.WaitGroup
-	for index := 0; index < eventCount; index++ {
-		wg.Add(1)
-		go func(index int) {
-			defer wg.Done()
-			logger.Info().Str("component", "test").Int("value", index).Msg("persisted")
-		}(index)
-	}
-	wg.Wait()
-	if err := logger.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := logger.Close(); err != nil {
-		t.Fatalf("second close: %v", err)
-	}
-
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(payload)), "\n")
-	if len(lines) != eventCount {
-		t.Fatalf("file log contains %d events, want %d", len(lines), eventCount)
-	}
-	seen := make(map[int]bool, eventCount)
-	for _, line := range lines {
-		var item struct {
-			Level     string `json:"level"`
-			Component string `json:"component"`
-			Value     *int   `json:"value"`
-			Time      any    `json:"time"`
-			Message   string `json:"message"`
-		}
-		if err := json.Unmarshal([]byte(line), &item); err != nil {
-			t.Fatalf("decode concurrent file event: %v", err)
-		}
-		if item.Level != "info" || item.Component != "test" || item.Message != "persisted" ||
-			item.Time == nil || item.Value == nil || *item.Value < 0 || *item.Value >= eventCount || seen[*item.Value] {
-			t.Fatalf("invalid file event: %+v", item)
-		}
-		seen[*item.Value] = true
-	}
-	if _, err := OpenLogger(""); !errors.Is(err, ErrInvalidArgument) {
-		t.Fatalf("empty logger path error=%v", err)
-	}
-	var zero *FileLogger
-	if err := zero.Close(); err != nil {
-		t.Fatalf("nil logger close: %v", err)
-	}
-	if err := (&FileLogger{}).Close(); err != nil {
-		t.Fatalf("zero logger close: %v", err)
 	}
 }
 
@@ -424,13 +244,5 @@ func BenchmarkSearchTemplate1080p(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _, _ = SearchTemplate(s, Rect{}, tm)
-	}
-}
-
-func BenchmarkStructuredLogger(b *testing.B) {
-	logger := NewLogger(io.Discard)
-	b.ReportAllocs()
-	for b.Loop() {
-		logger.Info().Int("value", 42).Msg("event")
 	}
 }

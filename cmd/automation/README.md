@@ -27,7 +27,6 @@ failures are timestamped Zerolog JSON events on stderr.
 | `windows` | Window enumeration, selectors, geometry, state, and optional process paths | Process-path lookup opens query-limited handles. |
 | `app-toggle` | Toggle an existing window or start a command when no match exists | May minimize/activate a window or start a process. |
 | `displays` | Virtual desktop, monitor work areas, current primary mode, and available modes | None. |
-| `settings` | Atomic INI read/write and synchronized structured JSON logging | Writes only when `-write` is supplied; appends JSON lines to a log. |
 
 ## Shared window selectors
 
@@ -206,35 +205,6 @@ go run ./cmd/automation/displays -modes -limit 0
 The example intentionally does not expose display-mode changes. `automation`
 does provide `SetDisplayMode` and `RestoreDisplayMode` for callers that make
 that system-wide choice explicitly.
-
-## Settings and logging
-
-Read an INI value and append the result to a timestamped JSON log:
-
-```powershell
-go run ./cmd/automation/settings `
-  -ini example.ini `
-  -section automation `
-  -key enabled `
-  -default false `
-  -log example.log
-```
-
-Add `-write` to atomically update the selected key before reading it:
-
-```powershell
-go run ./cmd/automation/settings `
-  -ini example.ini `
-  -section automation `
-  -key enabled `
-  -value true `
-  -write
-```
-
-The underlying helpers serialize same-process read-modify-write access to the
-same normalized path and use temporary-file replacement to avoid partial files.
-The log contains one Zerolog JSON object per line, including `component`,
-`path`, `section`, `key`, and `value` fields.
 
 ## Verification
 

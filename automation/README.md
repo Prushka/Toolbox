@@ -1,8 +1,8 @@
 # automation
 
-`automation` is a low-level Go package for the screen observation, image/pixel
-matching, window management, display management, timing, INI, and logging
-facilities commonly used in AutoHotkey automation. It is a primitive library
+`automation` is a low-level Go package for screen observation, image/pixel
+matching, window management, display management, and timing facilities commonly
+used in AutoHotkey automation. It is a primitive library
 rather than a workflow framework: callers own retry policy, orchestration, and
 application-specific decisions.
 
@@ -81,8 +81,7 @@ screen capture followed by a crop.
 
 Runnable examples live in [`cmd/automation`](../cmd/automation/README.md).
 They are organized as one focused command per directory and cover capture,
-pixel/image search, window inspection/toggling, display inspection, and
-INI/logging.
+pixel/image search, window inspection/toggling, and display inspection.
 
 ## Coordinates and data model
 
@@ -293,10 +292,6 @@ returned to the caller.
 
 ## Timing and polling
 
-`TickCount` is milliseconds since package initialization, based on Go's
-monotonic clock and appropriate for process-local elapsed-time calculations.
-`ElapsedSince` and `FormatTimestamp` are small AHK-style helpers.
-
 | API | Design and use |
 | --- | --- |
 | `Sleep(ctx, d)` | Context-aware sleep. A non-positive duration returns after checking cancellation. |
@@ -309,55 +304,12 @@ Nil contexts and predicates are rejected with `ErrInvalidArgument` instead of
 panicking. Use a timer-resolution lease only when measurement shows it is
 necessary because it can affect timer granularity and power use.
 
-## INI files and logging
-
-`INI` is a small case-insensitive section/key representation compatible with
-common AHK `IniRead`/`IniWrite` patterns. It recognizes
-section headers, `key=value` pairs, and `;`/`#` comment lines. `LoadINI` permits
-lines up to 4 MiB. `Get`, `Set`, `Delete`, and `Save` provide the in-memory API;
-`ReadINI` and `WriteINI` provide focused file helpers.
-
-Saves validate that names and values cannot corrupt INI syntax, write a sorted
-snapshot to a temporary file in the destination directory, flush and sync it,
-then atomically replace the destination. Same-process operations on the same
-normalized path are serialized, so concurrent `WriteINI` calls do not lose
-each other's independent key updates. An unrelated external process writing
-the same file is outside that guarantee; its last replacement can still win.
-
-Logging uses [`github.com/rs/zerolog`](https://github.com/rs/zerolog), a
-production-ready structured JSON logger. `NewLogger` creates a timestamped
-logger over any `io.Writer`; `OpenLogger` creates an append-only `FileLogger`
-and `Close` flushes and closes the owned file. Add typed fields and finish each
-event with `Msg`, for example:
-
-```go
-logger := automation.NewLogger(os.Stderr)
-logger.Info().Str("component", "settings").Int("count", 3).Msg("updated")
-```
-
-Each event is one JSON line with a timestamp, level, fields, and optional error.
-The writers serialize concurrent entries, and `FileLogger.Close` is idempotent;
-all goroutines using a `FileLogger` must stop before it is closed. Zerolog sends
-write failures to its configured `ErrorHandler` (or stderr by default). The old
-prefix and printf-style methods were intentionally removed in favor of typed,
-queryable fields.
-
-Zerolog was selected after reviewing its
-[upstream comparison benchmarks](https://github.com/rs/zerolog#benchmarks)
-against Zap and the standard logger. That suite reports zero allocations for
-Zerolog's static and contextual paths and the lowest times in those comparisons,
-including the ten-field case. Benchmarks vary by Go version, hardware, output
-sink, and event shape, so `BenchmarkStructuredLogger` measures this package's
-synchronized wrapper on the local toolchain.
-
 ## Concurrency and performance contracts
 
 | Component | Contract |
 | --- | --- |
 | `Template` | Immutable after construction and safe for concurrent `SearchTemplate` calls. |
 | `Bitmap` | Concurrent reads are safe after publication only while no goroutine mutates `Pixels` or calls `Set`. The type deliberately has no lock because it is a data container. |
-| `INI`, `ReadINI`, `WriteINI` | Safe for concurrent same-process use. Path serialization covers read-modify-write helpers and atomic persistence prevents partial files. |
-| `NewLogger` / `FileLogger` | Safe for concurrent entries; `FileLogger.Close` is idempotent and serializes flush/close with writes. |
 | `TimerResolution.Close` | Idempotent and concurrency-safe. |
 | `JitterSleep` with a supplied `*rand.Rand` | The call serializes its use of that generator. Code that also uses the generator directly must synchronize its own access. |
 | DPI initialization | `SetDPIAware` is process-wide, initialized once, and safe for concurrent callers. |
@@ -402,8 +354,6 @@ Win32 error when available. Search misses are not errors: search methods return
 | `EnumDisplaySettings`, `ChangeDisplaySettings` | `CurrentDisplayMode`, `DisplayModes`, `SetDisplayMode`, `RestoreDisplayMode` |
 | `Sleep`, randomized sleep, `timeBeginPeriod` | `Sleep`, `PreciseSleep`, `JitterSleep`, `BeginTimerResolution` |
 | `Process, Priority` | `SetProcessPriority`, `Window.SetProcessPriority` |
-| `IniRead`, `IniWrite` | `ReadINI`, `WriteINI`, `INI` |
-| Structured timestamped JSON logging | `NewLogger`, `OpenLogger`, `FileLogger` |
 | Read-only `MouseGetPos` | `CursorPosition` |
 
 Keyboard/mouse input, hotkeys, HID emulation, cursor clipping,
@@ -413,8 +363,8 @@ outside this package.
 ## Verification and references
 
 The package has unit tests for geometry, pixel and image semantics, image
-options, ownership and allocation guards, INI persistence, logging, timing,
-and concurrent use. Windows integration tests exercise the native contracts.
+options, ownership and allocation guards, timing, and concurrent use. Windows
+integration tests exercise the native contracts.
 
 ```powershell
 go vet ./automation
