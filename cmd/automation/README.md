@@ -28,6 +28,7 @@ failures are timestamped Zerolog JSON events on stderr.
 | `app-toggle` | Toggle an existing window or start a command when no match exists | May minimize/activate a window or start a process. |
 | `displays` | Virtual desktop, monitor work areas, current primary mode, and available modes | None. |
 | `input` | Read-only keyboard and mouse-button polling with press/release edges | None. |
+| `f1-trigger` | Event-driven global F1 registration with `InputMonitor` | Temporarily registers F1 as a system-wide hotkey. |
 
 ## Shared window selectors
 
@@ -207,7 +208,19 @@ The example intentionally does not expose display-mode changes. `automation`
 does provide `SetDisplayMode` and `RestoreDisplayMode` for callers that make
 that system-wide choice explicitly.
 
-## Input polling
+## Input monitoring and polling
+
+Run a function once whenever F1 is pressed:
+
+```powershell
+go run ./cmd/automation/f1-trigger
+```
+
+The example registers F1 through Windows `RegisterHotKey` and calls
+`doSomething` for each `WM_HOTKEY` event. Auto-repeat is disabled by default,
+so holding F1 runs the action once. Replace the body of `doSomething` with the
+work to trigger. The registration is global while the command runs and can
+claim F1 from the foreground application; closing the command unregisters it.
 
 Poll one or more virtual keys or mouse buttons. The command reports edges and
 stops on Ctrl+C; it never sends input.

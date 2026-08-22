@@ -14,6 +14,8 @@ var (
 	ErrInvalidRect     = errors.New("automation: invalid rectangle")
 	ErrInvalidArgument = errors.New("automation: invalid argument")
 	ErrNotFound        = errors.New("automation: not found")
+	ErrMonitorActive   = errors.New("automation: input monitor already active")
+	ErrMonitorClosed   = errors.New("automation: input monitor closed")
 )
 
 // HWND is an opaque native window handle.

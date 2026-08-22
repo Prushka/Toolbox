@@ -1,23 +1,28 @@
 # automation
 
 `automation` is a low-level Go package for screen observation, image/pixel
-matching, read-only keyboard/mouse polling, window management, display
+matching, keyboard/mouse monitoring and polling, window management, display
 management, and timing facilities commonly used in AutoHotkey automation. It
 is a primitive library rather than a workflow framework: callers own retry
 policy, orchestration, and application-specific decisions.
 
-The package deliberately has no keyboard or mouse synthesis, hotkey hooks,
-cursor clipping, serial/HID integration, process memory access, code injection,
-DLL loading into other processes, or security-bypass features. It does provide
-read-only keyboard and mouse polling so callers can implement their own action
-triggers.
+The package deliberately has no keyboard or mouse synthesis, cursor clipping,
+serial/HID integration, process memory access, code injection, DLL loading into
+other processes, or security-bypass features. It provides both event-driven
+input monitoring and direct keyboard/mouse state polling so callers can
+implement their own action triggers.
 
 The Windows implementation uses documented User32, GDI32, Kernel32, and WinMM
 APIs. Ordinary visible capture uses the desktop device context and `BitBlt`; it
 does not message the target window or open a target-process handle.
-`CapturePrintWindow`, process-path queries, and process-priority changes are
-explicit exceptions with normal documented Windows behavior:
+`InputMonitor`, `CapturePrintWindow`, process-path queries, and process-priority
+changes are explicit interactions with normal documented Windows behavior:
 
+- Keyboard monitoring registers requested combinations globally through
+  `RegisterHotKey`; this can claim a combination from the foreground program.
+- Mouse monitoring installs `WH_MOUSE_LL` only while mouse bindings exist. Its
+  callback filters button edges, never blocks on a consumer, never suppresses
+  input, and always calls the next hook.
 - `CapturePrintWindow` sends a synchronous render request to the target window.
 - `Window.ProcessPath`, and a `WindowQuery` with `Process`, open a
   query-limited process handle.
@@ -25,10 +30,11 @@ explicit exceptions with normal documented Windows behavior:
   priority class.
 
 This is a small, passive-by-default footprint, not a promise of invisibility
-or compatibility with every application. Protected, elevated, remote,
-sandboxed, and GPU-rendered applications may refuse, restrict, blank, or alter
-normal Windows APIs. The package does not attempt to work around those
-boundaries.
+or compatibility with every application. Mouse hooks and global hotkey
+registrations are observable system state even though they use documented APIs
+and do not inject code. Protected, elevated, remote, sandboxed, and GPU-rendered
+applications may refuse, restrict, blank, or alter normal Windows APIs. The
+package does not attempt to work around those boundaries.
 
 The package builds on non-Windows platforms so code can be tested there.
 Windows-specific window, capture, display, and process operations return
@@ -83,8 +89,8 @@ screen capture followed by a crop.
 
 Runnable examples live in [`cmd/automation`](../cmd/automation/README.md).
 They are organized as one focused command per directory and cover capture,
-pixel/image search, input polling, window inspection/toggling, and display
-inspection.
+pixel/image search, event-driven input monitoring, direct input polling, window
+inspection/toggling, and display inspection.
 
 ## Coordinates and data model
 
@@ -316,12 +322,93 @@ Nil contexts and predicates are rejected with `ErrInvalidArgument` instead of
 panicking. Use a timer-resolution lease only when measurement shows it is
 necessary because it can affect timer granularity and power use.
 
-## Keyboard and mouse polling
+## Keyboard and mouse monitoring
 
 `Key` is a Windows virtual-key code. The package exports constants for the
 standard keyboard, modifier, function, navigation, media, OEM, and mouse keys.
 `ParseKey` accepts those names case-insensitively, single ASCII letters and
 digits, `F1` through `F24`, `Numpad0` through `Numpad9`, and `VK_XX` hex codes.
+
+### Event-driven monitoring
+
+`InputMonitor` is the efficient trigger API. It owns one dedicated Go
+goroutine locked to a Windows message thread; one monitor can hold many
+bindings. Only one monitor may exist in a process at a time. Always close it to
+release native registrations promptly.
+
+Keyboard combinations use `RegisterHotKey` and arrive as `WM_HOTKEY` messages:
+
+```go
+monitor, err := automation.NewInputMonitor(automation.InputMonitorOptions{})
+if err != nil {
+	return err
+}
+defer monitor.Close()
+
+id, err := monitor.RegisterKeyboard(automation.KeyboardHotkey{
+	Key:       automation.KeyF1,
+	Modifiers: automation.ModifierControl | automation.ModifierShift,
+})
+if err != nil {
+	return err
+}
+
+for {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case event, ok := <-monitor.Events():
+		if !ok {
+			return monitor.Err()
+		}
+		if event.Binding == id {
+			// Run caller-owned work once for Ctrl+Shift+F1.
+		}
+	}
+}
+```
+
+`ModifierAlt`, `ModifierControl`/`ModifierCtrl`, `ModifierShift`, and
+`ModifierWin` may be combined. Windows cannot distinguish left and right
+modifiers in this API. Auto-repeat is disabled by default; set `AllowRepeat`
+when repeated `WM_HOTKEY` events are desired. Registration is global and fails
+when another component owns the same combination. It may also prevent the
+foreground program from receiving that combination. Keyboard release events
+and pass-through variants require a keyboard hook and are intentionally not
+part of this lower-footprint path.
+
+Mouse-button bindings use an AHK-style low-level mouse hook because Windows has
+no `RegisterHotKey` equivalent for pass-through mouse buttons:
+
+```go
+id, err := monitor.RegisterMouse(automation.MouseHotkey{
+	Button:    automation.MousePrimary,
+	Modifiers: automation.ModifierControl,
+	Trigger:   automation.MousePressAndRelease,
+})
+```
+
+The hook is installed lazily on the first mouse binding and removed with the
+last. Its callback takes an immutable binding snapshot, samples modifier state,
+queues matching events without waiting, and always calls `CallNextHookEx` so it
+does not consume the click. Primary and secondary are logical buttons and
+follow the Windows swapped-button setting. Modifier matching is exact by
+default; `AllowExtraModifiers` changes it to required-subset matching.
+`IgnoreInjected` filters mouse events carrying Windows' injected flag, while
+`InputEvent.Injected` and `LowerIntegrityInjected` expose those flags when the
+event is delivered.
+
+`InputMonitorOptions.Buffer` controls the bounded event channel; zero uses 64.
+The native message/hook thread never blocks behind client work. If the consumer
+falls behind, the event is discarded and `DroppedEvents` increments. Keep the
+event loop cheap and hand longer work to caller-owned workers when necessary.
+`Unregister` removes one binding by ID. `Close` unregisters everything, removes
+the hook, closes `Events` and `Done`, and is idempotent and concurrency-safe.
+
+Mouse wheel movement is not a button down/up state and is not currently exposed
+as a binding.
+
+### Direct polling
 
 `IsKeyDown` reads Windows' current asynchronous state with the high-order bit of
 `GetAsyncKeyState`; it does not use or consume the API's low-order transition
@@ -372,12 +459,11 @@ caller-chosen interval appropriate for the trigger.
 `MouseButtonKey` and `MouseButtonDown` expose logical primary, secondary,
 middle, X1, and X2 mouse buttons. Primary/secondary resolution follows the
 current Windows swapped-button setting. `CursorPosition` remains a separate
-read-only coordinate query. No input hooks, hidden goroutines, or process-wide
-event queues are installed.
+read-only coordinate query. These polling functions install nothing and own no
+goroutines or event queues.
 
 Mouse-wheel movement is not a down/up state and therefore cannot be observed
-by this polling API. Capturing wheel events would require a message target,
-raw-input registration, or a hook, none of which `automation` installs.
+by the polling API.
 
 ## Concurrency and performance contracts
 
@@ -388,15 +474,17 @@ raw-input registration, or a hook, none of which `automation` installs.
 | `TimerResolution.Close` | Idempotent and concurrency-safe. |
 | `JitterSleep` with a supplied `*rand.Rand` | The call serializes its use of that generator. Code that also uses the generator directly must synchronize its own access. |
 | DPI initialization | `SetDPIAware` is process-wide, initialized once, and safe for concurrent callers. |
+| `InputMonitor` | One monitor is allowed per process. Registration, unregistration, `Close`, `Err`, and dropped-event reads are safe for concurrent callers. Events and binding configurations are immutable values. |
 | `InputSnapshot` / input reads | Snapshots are immutable values; `IsKeyDown`, `KeyToggleOn`, `PollInput`, and snapshot reads have no shared mutable package state and are safe for concurrent callers. |
 | Windows handles and screen state | No operation can make a target window, desktop composition, or display layout stable. Handle a window disappearing, moving, being covered, or changing between calls. |
 
-The design favors short-lived native resources, bounded allocations, and no
-package-owned background goroutines. Every capture returns a new bitmap;
-templates are the reusable performance object. For high-rate polling, compile
-templates once, capture the smallest client region containing the target,
-choose a reasonable `WaitUntil` interval, and acquire timer resolution only
-when it is justified by measurement.
+The design favors short-lived native resources and bounded allocations.
+`InputMonitor` is the only API that owns a background goroutine, and its
+lifetime is explicit. Every capture returns a new bitmap; templates are the
+reusable performance object. For high-rate polling, compile templates once,
+capture the smallest client region containing the target, choose a reasonable
+`WaitUntil` interval, and acquire timer resolution only when it is justified by
+measurement.
 
 ## Errors and search results
 
@@ -406,6 +494,8 @@ when it is justified by measurement.
   geometry.
 - `ErrInvalidArgument`: invalid enum, nil required callback/context, malformed
   bitmap/template storage, or invalid option/input value.
+- `ErrMonitorActive`: another process-wide `InputMonitor` is already running.
+- `ErrMonitorClosed`: an operation was attempted after the monitor stopped.
 - `ErrUnsupported`: a Windows-only operation invoked on a non-Windows build.
 
 Windows failures generally add operation context and preserve a non-zero
@@ -431,13 +521,15 @@ Win32 error when available. Search misses are not errors: search methods return
 | `Sleep`, randomized sleep, `timeBeginPeriod` | `Sleep`, `PreciseSleep`, `JitterSleep`, `BeginTimerResolution` |
 | `Process, Priority` | `SetProcessPriority`, `Window.SetProcessPriority` |
 | Read-only `MouseGetPos` | `CursorPosition` |
+| Keyboard hotkeys such as `^+F1` | `InputMonitor.RegisterKeyboard` with `ModifierControl | ModifierShift` |
+| Pass-through mouse-button hotkeys | `InputMonitor.RegisterMouse` |
 | `GetKeyState` physical/toggle checks | `IsKeyDown`, `KeyToggleOn` |
 | Key/button trigger checks | `PollInput`, `InputSnapshot`, `MouseButtonDown` |
 
-Keyboard/mouse sending, hotkey registration, HID emulation, cursor clipping,
+Keyboard/mouse sending, keyboard-hook variants, HID emulation, cursor clipping,
 application-specific decision sequences, and presentation/debug UI remain
-outside this package. Read-only polling does not create an event stream and
-does not guarantee that very short transitions are observed.
+outside this package. Direct polling does not create an event stream and does
+not guarantee that very short transitions are observed.
 
 ## Verification and references
 
@@ -452,4 +544,4 @@ go test -race ./automation
 go test -run TestWindows -count=1 ./automation
 ```
 
-Semantics were checked against the [AutoHotkey v2 ImageSearch documentation](https://www.autohotkey.com/docs/v2/lib/ImageSearch.htm), [AutoHotkey v2 PixelSearch documentation](https://www.autohotkey.com/docs/v2/lib/PixelSearch.htm), [AutoHotkey v2 GetKeyState documentation](https://www.autohotkey.com/docs/v2/lib/GetKeyState.htm), [Microsoft GetAsyncKeyState documentation](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getasynckeystate), [Microsoft GetKeyState documentation](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getkeystate), [Microsoft BitBlt documentation](https://learn.microsoft.com/windows/win32/api/wingdi/nf-wingdi-bitblt), and [Microsoft PrintWindow documentation](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-printwindow).
+Semantics were checked against the [AutoHotkey v2 ImageSearch documentation](https://www.autohotkey.com/docs/v2/lib/ImageSearch.htm), [AutoHotkey v2 PixelSearch documentation](https://www.autohotkey.com/docs/v2/lib/PixelSearch.htm), [AutoHotkey v2 GetKeyState documentation](https://www.autohotkey.com/docs/v2/lib/GetKeyState.htm), [AutoHotkey v2 Hotkey documentation](https://www.autohotkey.com/docs/v2/Hotkeys.htm), [Microsoft RegisterHotKey documentation](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-registerhotkey), [Microsoft LowLevelMouseProc documentation](https://learn.microsoft.com/windows/win32/winmsg/lowlevelmouseproc), [Microsoft GetAsyncKeyState documentation](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getasynckeystate), [Microsoft GetKeyState documentation](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getkeystate), [Microsoft BitBlt documentation](https://learn.microsoft.com/windows/win32/api/wingdi/nf-wingdi-bitblt), and [Microsoft PrintWindow documentation](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-printwindow).

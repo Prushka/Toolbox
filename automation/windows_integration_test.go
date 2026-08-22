@@ -16,6 +16,16 @@ func TestWindowsCaptureAndDisplayQueries(t *testing.T) {
 	if got := unsafe.Sizeof(devMode{}); got != 220 {
 		t.Fatalf("DEVMODEW size=%d, want 220", got)
 	}
+	wantMessageSize, wantMouseEventSize := uintptr(48), uintptr(32)
+	if unsafe.Sizeof(uintptr(0)) == 4 {
+		wantMessageSize, wantMouseEventSize = 32, 24
+	}
+	if got := unsafe.Sizeof(winMessage{}); got != wantMessageSize {
+		t.Fatalf("MSG size=%d, want %d", got, wantMessageSize)
+	}
+	if got := unsafe.Sizeof(lowLevelMouseEvent{}); got != wantMouseEventSize {
+		t.Fatalf("MSLLHOOKSTRUCT size=%d, want %d", got, wantMouseEventSize)
+	}
 	s := PrimaryScreenRect()
 	if s.Empty() {
 		t.Fatalf("primary screen=%+v", s)
@@ -241,10 +251,251 @@ func TestWindowsInputPolling(t *testing.T) {
 	}
 }
 
+func TestWindowsInputMonitorKeyboardLifecycle(t *testing.T) {
+	monitor, err := NewInputMonitor(InputMonitorOptions{Buffer: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewInputMonitor(InputMonitorOptions{}); !errors.Is(err, ErrMonitorActive) {
+		t.Fatalf("second monitor error=%v", err)
+	}
+
+	hotkey := KeyboardHotkey{Key: KeyF24, Modifiers: ModifierControl | ModifierAlt | ModifierShift}
+	id, err := monitor.RegisterKeyboard(hotkey)
+	if err != nil {
+		_ = monitor.Close()
+		t.Fatal(err)
+	}
+	if id == 0 {
+		t.Fatal("zero keyboard binding ID")
+	}
+	if monitor.mouseHook != 0 || mouseHookMonitor.Load() != nil {
+		_ = monitor.Close()
+		t.Fatal("keyboard-only monitor installed a mouse hook")
+	}
+	if _, err := monitor.RegisterKeyboard(KeyboardHotkey{Key: KeyLButton}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("mouse virtual key registration error=%v", err)
+	}
+	if _, err := monitor.RegisterKeyboard(KeyboardHotkey{Key: KeyF1, Modifiers: Modifiers(0x80)}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("invalid modifier registration error=%v", err)
+	}
+
+	if ret, _, callErr := procPostThreadMessage.Call(uintptr(monitor.threadID.Load()), wmHotkey, uintptr(id), 0); ret == 0 {
+		_ = monitor.Close()
+		t.Fatal(winCallError(callErr, "posting test hotkey failed"))
+	}
+	select {
+	case event := <-monitor.Events():
+		if event.Binding != id || event.Kind != EventKeyboardHotkey || event.Key != hotkey.Key || event.Modifiers != hotkey.Modifiers {
+			t.Fatalf("keyboard event=%+v", event)
+		}
+	case <-time.After(time.Second):
+		_ = monitor.Close()
+		t.Fatal("timed out waiting for keyboard event")
+	}
+
+	if err := monitor.Unregister(id); err != nil {
+		_ = monitor.Close()
+		t.Fatal(err)
+	}
+	if err := monitor.Unregister(id); !errors.Is(err, ErrNotFound) {
+		_ = monitor.Close()
+		t.Fatalf("second unregister error=%v", err)
+	}
+	if err := monitor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := monitor.Close(); err != nil {
+		t.Fatalf("second close=%v", err)
+	}
+	if _, err := monitor.RegisterKeyboard(hotkey); !errors.Is(err, ErrMonitorClosed) {
+		t.Fatalf("registration after close=%v", err)
+	}
+	if _, ok := <-monitor.Events(); ok {
+		t.Fatal("event channel remained open after close")
+	}
+}
+
+func TestWindowsInputMonitorMouseLifecycle(t *testing.T) {
+	monitor, err := NewInputMonitor(InputMonitorOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := monitor.RegisterMouse(MouseHotkey{Button: MouseX2, Modifiers: ModifierControl})
+	if err != nil {
+		_ = monitor.Close()
+		t.Fatal(err)
+	}
+	if id == 0 || monitor.mouseHook == 0 {
+		_ = monitor.Close()
+		t.Fatalf("mouse registration id=%d hook=%#x", id, monitor.mouseHook)
+	}
+	if err := monitor.Unregister(id); err != nil {
+		_ = monitor.Close()
+		t.Fatal(err)
+	}
+	if monitor.mouseHook != 0 {
+		_ = monitor.Close()
+		t.Fatalf("mouse hook remained installed: %#x", monitor.mouseHook)
+	}
+	if err := monitor.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWindowsInputMonitorMouseMatchingAndOverflow(t *testing.T) {
+	monitor := &InputMonitor{events: make(chan InputEvent, 1), accepting: true}
+	monitor.mouseSnapshot.Store(&mouseMonitorSnapshot{bindings: []mouseMonitorBinding{
+		{id: 1, binding: MouseHotkey{Button: MouseX1, Modifiers: ModifierControl}},
+		{id: 2, binding: MouseHotkey{Button: MouseX1, Modifiers: ModifierControl, AllowExtraModifiers: true}},
+		{id: 3, binding: MouseHotkey{Button: MouseX1, Modifiers: ModifierControl, IgnoreInjected: true}},
+	}})
+	native := &lowLevelMouseEvent{
+		Point:     winPoint{X: 123, Y: -45},
+		MouseData: xButton1 << 16,
+		Time:      987,
+	}
+
+	monitor.dispatchMouseEvent(wmXButtonDown, native, ModifierControl|ModifierShift)
+	select {
+	case event := <-monitor.events:
+		if event.Binding != 2 || event.Kind != EventMousePress || event.Button != MouseX1 ||
+			event.Modifiers != ModifierControl|ModifierShift || event.Position != (Point{123, -45}) || event.MessageTime != 987 {
+			t.Fatalf("mouse event=%+v", event)
+		}
+	default:
+		t.Fatal("missing extra-modifier mouse event")
+	}
+
+	native.Flags = lowLevelMouseInjected | lowLevelMouseLowerIL
+	monitor.dispatchMouseEvent(wmXButtonDown, native, ModifierControl)
+	select {
+	case event := <-monitor.events:
+		if event.Binding != 1 || !event.Injected || !event.LowerIntegrityInjected {
+			t.Fatalf("injected mouse event=%+v", event)
+		}
+	default:
+		t.Fatal("missing injected mouse event")
+	}
+	if got := monitor.DroppedEvents(); got != 1 {
+		t.Fatalf("dropped events=%d, want 1", got)
+	}
+
+	monitor.dispatchMouseEvent(wmXButtonUp, native, ModifierControl)
+	select {
+	case event := <-monitor.events:
+		t.Fatalf("unexpected release event=%+v", event)
+	default:
+	}
+}
+
+func TestWindowsInputMonitorConcurrentClose(t *testing.T) {
+	monitor, err := NewInputMonitor(InputMonitorOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := monitor.RegisterMouse(MouseHotkey{Button: MouseMiddle}); err != nil {
+		_ = monitor.Close()
+		t.Fatal(err)
+	}
+	const workers = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- monitor.Close()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func TestWindowsInputMonitorConcurrentRegistration(t *testing.T) {
+	monitor, err := NewInputMonitor(InputMonitorOptions{Buffer: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const workers = 32
+	var wg sync.WaitGroup
+	ids := make(chan BindingID, workers)
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id, err := monitor.RegisterMouse(MouseHotkey{Button: MouseX2, Modifiers: ModifierControl})
+			if err != nil {
+				errs <- err
+				return
+			}
+			ids <- id
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	registered := make([]BindingID, 0, workers)
+	seen := make(map[BindingID]struct{}, workers)
+	for id := range ids {
+		if _, exists := seen[id]; exists {
+			t.Errorf("duplicate binding ID %d", id)
+		}
+		seen[id] = struct{}{}
+		registered = append(registered, id)
+	}
+	if len(registered) != workers {
+		_ = monitor.Close()
+		t.Fatalf("registered %d bindings, want %d", len(registered), workers)
+	}
+
+	errs = make(chan error, workers)
+	for _, id := range registered {
+		wg.Add(1)
+		go func(id BindingID) {
+			defer wg.Done()
+			errs <- monitor.Unregister(id)
+		}(id)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	if err := monitor.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func BenchmarkPollInput(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_, _ = PollInput(KeyCtrl, KeyShift, KeyF8, KeyLButton)
+	}
+}
+
+func BenchmarkMouseMonitorDispatch(b *testing.B) {
+	monitor := &InputMonitor{events: make(chan InputEvent, 1), accepting: true}
+	monitor.mouseSnapshot.Store(&mouseMonitorSnapshot{bindings: []mouseMonitorBinding{
+		{id: 1, binding: MouseHotkey{Button: MouseX1, Modifiers: ModifierControl}},
+	}})
+	native := &lowLevelMouseEvent{MouseData: xButton1 << 16}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		monitor.dispatchMouseEvent(wmXButtonDown, native, ModifierControl)
+		<-monitor.events
 	}
 }
 
