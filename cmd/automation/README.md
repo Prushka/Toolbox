@@ -27,6 +27,7 @@ failures are timestamped Zerolog JSON events on stderr.
 | `windows` | Window enumeration, selectors, geometry, state, and optional process paths | Process-path lookup opens query-limited handles. |
 | `app-toggle` | Toggle an existing window or start a command when no match exists | May minimize/activate a window or start a process. |
 | `displays` | Virtual desktop, monitor work areas, current primary mode, and available modes | None. |
+| `input` | Read-only keyboard and mouse-button polling with press/release edges | None. |
 
 ## Shared window selectors
 
@@ -205,6 +206,20 @@ go run ./cmd/automation/displays -modes -limit 0
 The example intentionally does not expose display-mode changes. `automation`
 does provide `SetDisplayMode` and `RestoreDisplayMode` for callers that make
 that system-wide choice explicitly.
+
+## Input polling
+
+Poll one or more virtual keys or mouse buttons. The command reports edges and
+stops on Ctrl+C; it never sends input.
+
+```powershell
+go run ./cmd/automation/input -key F8 -key LButton -interval 16ms
+```
+
+Use repeated `-key` flags to observe several keys. `automation.PollInput` and
+`InputSnapshot` are the library API behind this example; callers can use
+`PressedSince`, `ReleasedSince`, `AnyDown`, and `AllDown` to trigger their own
+actions. Very short transitions can be missed if they occur between polls.
 
 ## Verification
 

@@ -137,6 +137,58 @@ func TestWindowsRejectsInvalidArguments(t *testing.T) {
 	if err := SetProcessPriority(uint32(os.Getpid()), ProcessPriority(1)); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("invalid process priority=%v", err)
 	}
+	if _, err := IsKeyDown(0); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("invalid key state=%v", err)
+	}
+	if _, err := KeyToggleOn(0); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("invalid toggle key=%v", err)
+	}
+	if _, err := PollInput(); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("empty input poll=%v", err)
+	}
+	if _, err := MouseButtonKey(0); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("invalid mouse button=%v", err)
+	}
+}
+
+func TestWindowsInputPolling(t *testing.T) {
+	if _, err := IsKeyDown(KeyF24); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := KeyToggleOn(KeyCapsLock); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := PollInput(KeyLShift, KeyRShift, KeyLButton, KeyLShift)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []Key{KeyLShift, KeyRShift, KeyLButton} {
+		if !snapshot.Sampled(key) {
+			t.Fatalf("key %s was not sampled", key)
+		}
+	}
+	primary, err := MouseButtonKey(MousePrimary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary, err := MouseButtonKey(MouseSecondary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validPrimary := primary == KeyLButton || primary == KeyRButton
+	validSecondary := secondary == KeyLButton || secondary == KeyRButton
+	if primary == secondary || !validPrimary || !validSecondary {
+		t.Fatalf("logical mouse mapping primary=%s secondary=%s", primary, secondary)
+	}
+	for _, button := range []MouseButton{MousePrimary, MouseSecondary, MouseMiddle, MouseX1, MouseX2} {
+		key, err := MouseButtonKey(button)
+		if err != nil || !key.Valid() {
+			t.Fatalf("button %d resolved to %v, %v", button, key, err)
+		}
+		if _, err := MouseButtonDown(button); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestSetDPIAwareConcurrent(t *testing.T) {

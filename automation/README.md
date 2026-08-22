@@ -1,14 +1,16 @@
 # automation
 
 `automation` is a low-level Go package for screen observation, image/pixel
-matching, window management, display management, and timing facilities commonly
-used in AutoHotkey automation. It is a primitive library
-rather than a workflow framework: callers own retry policy, orchestration, and
-application-specific decisions.
+matching, read-only keyboard/mouse polling, window management, display
+management, and timing facilities commonly used in AutoHotkey automation. It
+is a primitive library rather than a workflow framework: callers own retry
+policy, orchestration, and application-specific decisions.
 
-The package deliberately has no keyboard or mouse synthesis, hotkeys, input
-hooks, cursor clipping, serial/HID integration, process memory access, code
-injection, DLL loading into other processes, or security-bypass features.
+The package deliberately has no keyboard or mouse synthesis, hotkey hooks,
+cursor clipping, serial/HID integration, process memory access, code injection,
+DLL loading into other processes, or security-bypass features. It does provide
+read-only keyboard and mouse polling so callers can implement their own action
+triggers.
 
 The Windows implementation uses documented User32, GDI32, Kernel32, and WinMM
 APIs. Ordinary visible capture uses the desktop device context and `BitBlt`; it
@@ -81,7 +83,8 @@ screen capture followed by a crop.
 
 Runnable examples live in [`cmd/automation`](../cmd/automation/README.md).
 They are organized as one focused command per directory and cover capture,
-pixel/image search, window inspection/toggling, and display inspection.
+pixel/image search, input polling, window inspection/toggling, and display
+inspection.
 
 ## Coordinates and data model
 
@@ -304,6 +307,69 @@ Nil contexts and predicates are rejected with `ErrInvalidArgument` instead of
 panicking. Use a timer-resolution lease only when measurement shows it is
 necessary because it can affect timer granularity and power use.
 
+## Keyboard and mouse polling
+
+`Key` is a Windows virtual-key code. The package exports constants for the
+standard keyboard, modifier, function, navigation, media, OEM, and mouse keys.
+`ParseKey` accepts those names case-insensitively, single ASCII letters and
+digits, `F1` through `F24`, `Numpad0` through `Numpad9`, and `VK_XX` hex codes.
+
+`IsKeyDown` reads Windows' current asynchronous state with the high-order bit of
+`GetAsyncKeyState`; it does not use or consume the API's low-order transition
+bit. `KeyToggleOn` reads the lock-key toggle bit with `GetKeyState`, such as
+`CapsLock`, `NumLock`, or `ScrollLock`. A generic logical-state API is omitted:
+that state belongs to an OS thread's input queue, while Go goroutines can move
+between OS threads.
+
+Windows can also return zero when this process cannot query the active desktop,
+and the API provides no separate failure result. Polling reports system state;
+it does not establish whether a down key originated from hardware, synthesized
+input, or another allowed input source.
+
+For a trigger loop, pass the keys of interest to `PollInput` and retain the
+returned value as the next iteration's baseline:
+
+```go
+keys := []automation.Key{automation.KeyF8, automation.KeyCtrl, automation.KeyLButton}
+previous, err := automation.PollInput(keys...)
+if err != nil {
+	return err
+}
+for {
+	current, err := automation.PollInput(keys...)
+	if err != nil {
+		return err
+	}
+	if current.PressedSince(previous, automation.KeyF8) &&
+		current.AllDown(automation.KeyCtrl) {
+		// Trigger caller-owned work here; no input is sent by automation.
+	}
+	previous = current
+	if err := automation.Sleep(ctx, 16*time.Millisecond); err != nil {
+		return err
+	}
+}
+```
+
+`InputSnapshot` is an immutable value. `Sampled`, `Down`, `AnyDown`,
+`AllDown`, `PressedSince`, and `ReleasedSince` make key and chord checks
+explicit. Both snapshots must contain a key for an edge to be reported, which
+prevents the first sample from looking like a press. Duplicate keys in one
+poll are read once. The native calls are sequential rather than atomic, so a
+key changing during a multi-key sample may be observed in the next iteration.
+Polling can miss a press and release that both happen between samples; use a
+caller-chosen interval appropriate for the trigger.
+
+`MouseButtonKey` and `MouseButtonDown` expose logical primary, secondary,
+middle, X1, and X2 mouse buttons. Primary/secondary resolution follows the
+current Windows swapped-button setting. `CursorPosition` remains a separate
+read-only coordinate query. No input hooks, hidden goroutines, or process-wide
+event queues are installed.
+
+Mouse-wheel movement is not a down/up state and therefore cannot be observed
+by this polling API. Capturing wheel events would require a message target,
+raw-input registration, or a hook, none of which `automation` installs.
+
 ## Concurrency and performance contracts
 
 | Component | Contract |
@@ -313,6 +379,7 @@ necessary because it can affect timer granularity and power use.
 | `TimerResolution.Close` | Idempotent and concurrency-safe. |
 | `JitterSleep` with a supplied `*rand.Rand` | The call serializes its use of that generator. Code that also uses the generator directly must synchronize its own access. |
 | DPI initialization | `SetDPIAware` is process-wide, initialized once, and safe for concurrent callers. |
+| `InputSnapshot` / input reads | Snapshots are immutable values; `IsKeyDown`, `KeyToggleOn`, `PollInput`, and snapshot reads have no shared mutable package state and are safe for concurrent callers. |
 | Windows handles and screen state | No operation can make a target window, desktop composition, or display layout stable. Handle a window disappearing, moving, being covered, or changing between calls. |
 
 The design favors short-lived native resources, bounded allocations, and no
@@ -355,10 +422,13 @@ Win32 error when available. Search misses are not errors: search methods return
 | `Sleep`, randomized sleep, `timeBeginPeriod` | `Sleep`, `PreciseSleep`, `JitterSleep`, `BeginTimerResolution` |
 | `Process, Priority` | `SetProcessPriority`, `Window.SetProcessPriority` |
 | Read-only `MouseGetPos` | `CursorPosition` |
+| `GetKeyState` physical/toggle checks | `IsKeyDown`, `KeyToggleOn` |
+| Key/button trigger checks | `PollInput`, `InputSnapshot`, `MouseButtonDown` |
 
-Keyboard/mouse input, hotkeys, HID emulation, cursor clipping,
+Keyboard/mouse sending, hotkey registration, HID emulation, cursor clipping,
 application-specific decision sequences, and presentation/debug UI remain
-outside this package.
+outside this package. Read-only polling does not create an event stream and
+does not guarantee that very short transitions are observed.
 
 ## Verification and references
 
@@ -373,4 +443,4 @@ go test -race ./automation
 go test -run TestWindows -count=1 ./automation
 ```
 
-Semantics were checked against the [AutoHotkey v2 ImageSearch documentation](https://www.autohotkey.com/docs/v2/lib/ImageSearch.htm), [AutoHotkey v2 PixelSearch documentation](https://www.autohotkey.com/docs/v2/lib/PixelSearch.htm), [Microsoft BitBlt documentation](https://learn.microsoft.com/windows/win32/api/wingdi/nf-wingdi-bitblt), and [Microsoft PrintWindow documentation](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-printwindow).
+Semantics were checked against the [AutoHotkey v2 ImageSearch documentation](https://www.autohotkey.com/docs/v2/lib/ImageSearch.htm), [AutoHotkey v2 PixelSearch documentation](https://www.autohotkey.com/docs/v2/lib/PixelSearch.htm), [AutoHotkey v2 GetKeyState documentation](https://www.autohotkey.com/docs/v2/lib/GetKeyState.htm), [Microsoft GetAsyncKeyState documentation](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getasynckeystate), [Microsoft GetKeyState documentation](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getkeystate), [Microsoft BitBlt documentation](https://learn.microsoft.com/windows/win32/api/wingdi/nf-wingdi-bitblt), and [Microsoft PrintWindow documentation](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-printwindow).

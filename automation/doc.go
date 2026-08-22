@@ -1,7 +1,8 @@
 // Package automation contains low-level, observation-oriented Windows
 // automation primitives. It deliberately does not synthesize keyboard or
 // mouse input, install hooks, inject into processes, or bypass application
-// security boundaries.
+// security boundaries. Read-only keyboard and mouse polling is available
+// through IsKeyDown and PollInput; callers own the polling loop and actions.
 //
 // Capture functions use documented GDI/User32 APIs. Window-relative helpers
 // treat coordinates as client-area coordinates, matching AutoHotkey's
