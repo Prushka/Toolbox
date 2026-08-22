@@ -269,6 +269,10 @@ func TestWindowsInputMonitorKeyboardLifecycle(t *testing.T) {
 	if id == 0 {
 		t.Fatal("zero keyboard binding ID")
 	}
+	if _, err := monitor.RegisterKeyboard(hotkey); err == nil {
+		_ = monitor.Close()
+		t.Fatal("duplicate keyboard hotkey registration succeeded")
+	}
 	if monitor.mouseHook != 0 || mouseHookMonitor.Load() != nil {
 		_ = monitor.Close()
 		t.Fatal("keyboard-only monitor installed a mouse hook")
@@ -344,7 +348,7 @@ func TestWindowsInputMonitorMouseLifecycle(t *testing.T) {
 }
 
 func TestWindowsInputMonitorMouseMatchingAndOverflow(t *testing.T) {
-	monitor := &InputMonitor{events: make(chan InputEvent, 1), accepting: true}
+	monitor := &InputMonitor{events: make(chan InputEvent, 1)}
 	monitor.mouseSnapshot.Store(&mouseMonitorSnapshot{bindings: []mouseMonitorBinding{
 		{id: 1, binding: MouseHotkey{Button: MouseX1, Modifiers: ModifierControl}},
 		{id: 2, binding: MouseHotkey{Button: MouseX1, Modifiers: ModifierControl, AllowExtraModifiers: true}},
@@ -414,6 +418,34 @@ func TestWindowsInputMonitorConcurrentClose(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
+	}
+	if mouseHookMonitor.Load() != nil {
+		t.Fatal("mouse hook monitor remained published after concurrent close")
+	}
+}
+
+func TestWindowsMouseMessageLogicalButtons(t *testing.T) {
+	tests := []struct {
+		message uint32
+		swapped bool
+		button  MouseButton
+		pressed bool
+	}{
+		{wmLButtonDown, false, MousePrimary, true},
+		{wmLButtonUp, false, MousePrimary, false},
+		{wmRButtonDown, false, MouseSecondary, true},
+		{wmRButtonUp, false, MouseSecondary, false},
+		{wmLButtonDown, true, MouseSecondary, true},
+		{wmRButtonDown, true, MousePrimary, true},
+	}
+	for _, test := range tests {
+		button, pressed, ok := mouseMessageButton(test.message, 0, test.swapped)
+		if !ok || button != test.button || pressed != test.pressed {
+			t.Errorf("mouseMessageButton(%#x, swapped=%t)=%v,%t,%t", test.message, test.swapped, button, pressed, ok)
+		}
+	}
+	if _, _, ok := mouseMessageButton(0, 0, false); ok {
+		t.Fatal("unknown mouse message accepted")
 	}
 }
 
@@ -486,7 +518,7 @@ func BenchmarkPollInput(b *testing.B) {
 }
 
 func BenchmarkMouseMonitorDispatch(b *testing.B) {
-	monitor := &InputMonitor{events: make(chan InputEvent, 1), accepting: true}
+	monitor := &InputMonitor{events: make(chan InputEvent, 1)}
 	monitor.mouseSnapshot.Store(&mouseMonitorSnapshot{bindings: []mouseMonitorBinding{
 		{id: 1, binding: MouseHotkey{Button: MouseX1, Modifiers: ModifierControl}},
 	}})

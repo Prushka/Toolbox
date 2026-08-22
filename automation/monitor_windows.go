@@ -115,9 +115,6 @@ type InputMonitor struct {
 	errMu sync.RWMutex
 	err   error
 
-	eventMu   sync.RWMutex
-	accepting bool
-
 	// The following fields are owned by the locked message-loop goroutine.
 	keyboardBindings map[BindingID]KeyboardHotkey
 	mouseBindings    map[BindingID]MouseHotkey
@@ -143,7 +140,6 @@ func NewInputMonitor(options InputMonitorOptions) (*InputMonitor, error) {
 		events:           make(chan InputEvent, buffer),
 		done:             make(chan struct{}),
 		commands:         make(chan monitorCommand, 1),
-		accepting:        true,
 		keyboardBindings: make(map[BindingID]KeyboardHotkey),
 		mouseBindings:    make(map[BindingID]MouseHotkey),
 	}
@@ -528,7 +524,12 @@ func (m *InputMonitor) dispatchMouseEvent(message uint32, native *lowLevelMouseE
 	if native == nil {
 		return
 	}
-	button, pressed, ok := mouseMessageButton(message, native.MouseData)
+	swapped := false
+	if message == wmLButtonDown || message == wmLButtonUp || message == wmRButtonDown || message == wmRButtonUp {
+		value, _, _ := syscall.Syscall(procGetSystemMetrics.Addr(), 1, smSwapButton, 0, 0)
+		swapped = value != 0
+	}
+	button, pressed, ok := mouseMessageButton(message, native.MouseData, swapped)
 	if !ok {
 		return
 	}
@@ -567,11 +568,6 @@ func (m *InputMonitor) dispatchMouseEvent(message uint32, native *lowLevelMouseE
 }
 
 func (m *InputMonitor) publish(event InputEvent) {
-	m.eventMu.RLock()
-	defer m.eventMu.RUnlock()
-	if !m.accepting {
-		return
-	}
 	select {
 	case m.events <- event:
 	default:
@@ -609,10 +605,9 @@ func (m *InputMonitor) finish(err error) {
 	}
 	activeInputMonitorMu.Unlock()
 
-	m.eventMu.Lock()
-	m.accepting = false
+	// Low-level hook callbacks run on this message thread, so after native
+	// cleanup there can be no publisher racing this close.
 	close(m.events)
-	m.eventMu.Unlock()
 	close(m.done)
 }
 
@@ -629,16 +624,20 @@ func mouseTriggerMatches(trigger MouseTrigger, pressed bool) bool {
 	return trigger == MousePressAndRelease || trigger == MousePress && pressed || trigger == MouseRelease && !pressed
 }
 
-func mouseMessageButton(message, mouseData uint32) (MouseButton, bool, bool) {
+func mouseMessageButton(message, mouseData uint32, swapped bool) (MouseButton, bool, bool) {
+	primary, secondary := MousePrimary, MouseSecondary
+	if swapped {
+		primary, secondary = secondary, primary
+	}
 	switch message {
 	case wmLButtonDown:
-		return MousePrimary, true, true
+		return primary, true, true
 	case wmLButtonUp:
-		return MousePrimary, false, true
+		return primary, false, true
 	case wmRButtonDown:
-		return MouseSecondary, true, true
+		return secondary, true, true
 	case wmRButtonUp:
-		return MouseSecondary, false, true
+		return secondary, false, true
 	case wmMButtonDown:
 		return MouseMiddle, true, true
 	case wmMButtonUp:

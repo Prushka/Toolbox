@@ -140,3 +140,96 @@ func (s *Strings) Set(value string) error {
 	*s = append(*s, value)
 	return nil
 }
+
+// ModifierFlags provides the four modifier groups supported by RegisterHotKey.
+type ModifierFlags struct {
+	Alt, Control, Shift, Win bool
+}
+
+func (m *ModifierFlags) Bind(fs *flag.FlagSet) {
+	fs.BoolVar(&m.Alt, "alt", false, "require Alt")
+	fs.BoolVar(&m.Control, "ctrl", false, "require Ctrl")
+	fs.BoolVar(&m.Shift, "shift", false, "require Shift")
+	fs.BoolVar(&m.Win, "win", false, "require the Windows key")
+}
+
+func (m ModifierFlags) Modifiers() automation.Modifiers {
+	var modifiers automation.Modifiers
+	if m.Alt {
+		modifiers |= automation.ModifierAlt
+	}
+	if m.Control {
+		modifiers |= automation.ModifierControl
+	}
+	if m.Shift {
+		modifiers |= automation.ModifierShift
+	}
+	if m.Win {
+		modifiers |= automation.ModifierWin
+	}
+	return modifiers
+}
+
+func FormatModifiers(modifiers automation.Modifiers) string {
+	parts := make([]string, 0, 4)
+	if modifiers&automation.ModifierControl != 0 {
+		parts = append(parts, "Ctrl")
+	}
+	if modifiers&automation.ModifierAlt != 0 {
+		parts = append(parts, "Alt")
+	}
+	if modifiers&automation.ModifierShift != 0 {
+		parts = append(parts, "Shift")
+	}
+	if modifiers&automation.ModifierWin != 0 {
+		parts = append(parts, "Win")
+	}
+	return strings.Join(parts, "+")
+}
+
+func ParseMouseButton(value string) (automation.MouseButton, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "primary":
+		return automation.MousePrimary, nil
+	case "secondary":
+		return automation.MouseSecondary, nil
+	case "middle":
+		return automation.MouseMiddle, nil
+	case "x1":
+		return automation.MouseX1, nil
+	case "x2":
+		return automation.MouseX2, nil
+	default:
+		return 0, fmt.Errorf("mouse button must be primary, secondary, middle, x1, or x2")
+	}
+}
+
+func FormatMouseButton(button automation.MouseButton) string {
+	switch button {
+	case automation.MousePrimary:
+		return "primary"
+	case automation.MouseSecondary:
+		return "secondary"
+	case automation.MouseMiddle:
+		return "middle"
+	case automation.MouseX1:
+		return "x1"
+	case automation.MouseX2:
+		return "x2"
+	default:
+		return fmt.Sprintf("button-%d", button)
+	}
+}
+
+func ParseMouseTrigger(value string) (automation.MouseTrigger, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "press", "down":
+		return automation.MousePress, nil
+	case "release", "up":
+		return automation.MouseRelease, nil
+	case "both":
+		return automation.MousePressAndRelease, nil
+	default:
+		return 0, fmt.Errorf("mouse trigger must be press, release, or both")
+	}
+}

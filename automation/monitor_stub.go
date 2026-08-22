@@ -5,7 +5,12 @@ package automation
 // InputMonitor is unavailable outside Windows.
 type InputMonitor struct{}
 
-func NewInputMonitor(InputMonitorOptions) (*InputMonitor, error) { return nil, ErrUnsupported }
+func NewInputMonitor(options InputMonitorOptions) (*InputMonitor, error) {
+	if _, err := inputEventBufferSize(options); err != nil {
+		return nil, err
+	}
+	return nil, ErrUnsupported
+}
 func (*InputMonitor) RegisterKeyboard(KeyboardHotkey) (BindingID, error) {
 	return 0, ErrUnsupported
 }

@@ -29,6 +29,8 @@ failures are timestamped Zerolog JSON events on stderr.
 | `displays` | Virtual desktop, monitor work areas, current primary mode, and available modes | None. |
 | `input` | Read-only keyboard and mouse-button polling with press/release edges | None. |
 | `f1-trigger` | Event-driven global F1 registration with `InputMonitor` | Temporarily registers F1 as a system-wide hotkey. |
+| `keyboard-hotkey` | Configurable event-driven keyboard hotkeys and modifiers | Temporarily registers the requested combination globally. |
+| `mouse-hotkey` | Pass-through mouse-button monitoring with modifiers and edge selection | Installs a low-level mouse hook while running. |
 
 ## Shared window selectors
 
@@ -221,6 +223,29 @@ The example registers F1 through Windows `RegisterHotKey` and calls
 so holding F1 runs the action once. Replace the body of `doSomething` with the
 work to trigger. The registration is global while the command runs and can
 claim F1 from the foreground application; closing the command unregisters it.
+
+Register Ctrl+Shift+F2 without polling:
+
+```powershell
+go run ./cmd/automation/keyboard-hotkey -key F2 -ctrl -shift
+```
+
+The `-alt`, `-ctrl`, `-shift`, and `-win` flags can be combined. Auto-repeat is
+disabled unless `-repeat` is supplied. Windows rejects registration when the
+combination is reserved or already owned by another process.
+
+Monitor Ctrl+primary-button presses without consuming the click:
+
+```powershell
+go run ./cmd/automation/mouse-hotkey -button primary -ctrl
+```
+
+`-button` accepts `primary`, `secondary`, `middle`, `x1`, and `x2`.
+`-trigger` accepts `press`, `release`, or `both`. Modifier matching is exact by
+default; `-allow-extra-modifiers` changes it to required-subset matching.
+`-ignore-injected` omits events Windows marks as injected. The low-level mouse
+hook is installed only while this binding exists and always passes the event to
+the next hook.
 
 Poll one or more virtual keys or mouse buttons. The command reports edges and
 stops on Ctrl+C; it never sends input.
