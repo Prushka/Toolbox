@@ -25,6 +25,7 @@ const (
 	cdsUpdateRegistry    = 0x00000001
 	dispChangeSuccessful = 0
 	monitorInfoPrimary   = 1
+	maxDisplayModes      = 4096
 )
 
 // devMode is DEVMODEW. Its size is checked in the Windows integration tests.
@@ -53,12 +54,15 @@ func CurrentDisplayMode() (DisplayMode, error) {
 func DisplayModes() ([]DisplayMode, error) {
 	var out []DisplayMode
 	seen := map[DisplayMode]bool{}
-	for i := uint32(0); ; i++ {
+	for i := uint32(0); i < maxDisplayModes; i++ {
 		var dm devMode
 		dm.Size = uint16(unsafe.Sizeof(dm))
 		ret, _, _ := procEnumDisplaySettings.Call(0, uintptr(i), uintptr(unsafe.Pointer(&dm)))
 		if ret == 0 {
-			break
+			if len(out) == 0 {
+				return nil, ErrNotFound
+			}
+			return out, nil
 		}
 		m := modeFromDev(dm)
 		if !seen[m] {
@@ -66,10 +70,7 @@ func DisplayModes() ([]DisplayMode, error) {
 			out = append(out, m)
 		}
 	}
-	if len(out) == 0 {
-		return nil, ErrNotFound
-	}
-	return out, nil
+	return nil, fmt.Errorf("automation: display mode enumeration exceeded %d entries", maxDisplayModes)
 }
 func modeFromDev(d devMode) DisplayMode {
 	return DisplayMode{int(d.PelsWidth), int(d.PelsHeight), int(d.BitsPerPel), int(d.DisplayFrequency)}
@@ -129,23 +130,47 @@ type monitorInfo struct {
 	Flags         uint32
 }
 
-func Monitors() ([]Monitor, error) {
-	var out []Monitor
-	var callbackErr error
-	cb := windows.NewCallback(func(hmon, hdc, rect, data uintptr) uintptr {
-		mi := monitorInfo{Size: uint32(unsafe.Sizeof(monitorInfo{}))}
-		if ok, _, callErr := procGetMonitorInfo.Call(hmon, uintptr(unsafe.Pointer(&mi))); ok == 0 {
-			callbackErr = winCallError(callErr, "GetMonitorInfo failed")
-			return 0
-		}
-		out = append(out, Monitor{Rect: Rect{int(mi.Monitor.Left), int(mi.Monitor.Top), int(mi.Monitor.Right), int(mi.Monitor.Bottom)}, WorkArea: Rect{int(mi.Work.Left), int(mi.Work.Top), int(mi.Work.Right), int(mi.Work.Bottom)}, Primary: mi.Flags&monitorInfoPrimary != 0})
-		return 1
+type monitorEnumState struct {
+	monitors []Monitor
+	err      error
+}
+
+var enumMonitorsCallback = windows.NewCallback(func(hmon, hdc, rect, data uintptr) uintptr {
+	value, ok := callbackStates.Load(data)
+	if !ok {
+		return 0
+	}
+	state, ok := value.(*monitorEnumState)
+	if !ok {
+		return 0
+	}
+	mi := monitorInfo{Size: uint32(unsafe.Sizeof(monitorInfo{}))}
+	if ok, _, callErr := procGetMonitorInfo.Call(hmon, uintptr(unsafe.Pointer(&mi))); ok == 0 {
+		state.err = winCallError(callErr, "GetMonitorInfo failed")
+		return 0
+	}
+	state.monitors = append(state.monitors, Monitor{
+		Rect: Rect{
+			int(mi.Monitor.Left), int(mi.Monitor.Top), int(mi.Monitor.Right), int(mi.Monitor.Bottom),
+		},
+		WorkArea: Rect{
+			int(mi.Work.Left), int(mi.Work.Top), int(mi.Work.Right), int(mi.Work.Bottom),
+		},
+		Primary: mi.Flags&monitorInfoPrimary != 0,
 	})
-	if ret, _, callErr := procEnumDisplayMonitors.Call(0, 0, cb, 0); ret == 0 {
-		if callbackErr != nil {
-			return nil, callbackErr
+	return 1
+})
+
+func Monitors() ([]Monitor, error) {
+	state := &monitorEnumState{}
+	stateID, unregister := registerCallbackState(state)
+	defer unregister()
+	ret, _, callErr := procEnumDisplayMonitors.Call(0, 0, enumMonitorsCallback, stateID)
+	if ret == 0 {
+		if state.err != nil {
+			return nil, state.err
 		}
 		return nil, winCallError(callErr, "EnumDisplayMonitors failed")
 	}
-	return out, nil
+	return state.monitors, nil
 }

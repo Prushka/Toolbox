@@ -15,7 +15,6 @@ var (
 	gdi32                  = windows.NewLazySystemDLL("gdi32.dll")
 	procGetDC              = user32.NewProc("GetDC")
 	procReleaseDC          = user32.NewProc("ReleaseDC")
-	procGetWindowDC        = user32.NewProc("GetWindowDC")
 	procGetClientRect      = user32.NewProc("GetClientRect")
 	procGetWindowRect      = user32.NewProc("GetWindowRect")
 	procClientToScreen     = user32.NewProc("ClientToScreen")
@@ -177,35 +176,33 @@ func CaptureWindowRegion(hwnd HWND, region Rect, opts CaptureOptions) (*Bitmap, 
 	if region.Empty() {
 		return nil, ErrInvalidRect
 	}
-	if opts.Method == CaptureVisible {
-		var p winPoint
-		if ret, _, callErr := procClientToScreen.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&p))); ret == 0 {
-			return nil, winCallError(callErr, "ClientToScreen failed")
+	if opts.Method != CaptureVisible {
+		b, printErr := capturePrintWindowRegion(hwnd, w, h, true, region)
+		if printErr == nil || opts.Method == CapturePrintWindow {
+			return b, printErr
 		}
-		left, ok := checkedAddInt(int(p.X), region.Left)
-		if !ok {
-			return nil, ErrInvalidArgument
-		}
-		top, ok := checkedAddInt(int(p.Y), region.Top)
-		if !ok {
-			return nil, ErrInvalidArgument
-		}
-		right, ok := checkedAddInt(int(p.X), region.Right)
-		if !ok {
-			return nil, ErrInvalidArgument
-		}
-		bottom, ok := checkedAddInt(int(p.Y), region.Bottom)
-		if !ok {
-			return nil, ErrInvalidArgument
-		}
-		return CaptureScreen(Rect{left, top, right, bottom})
 	}
-	opts.ClientOnly = true
-	full, err := CaptureWindow(hwnd, opts)
-	if err != nil {
-		return nil, err
+	var p winPoint
+	if ret, _, callErr := procClientToScreen.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&p))); ret == 0 {
+		return nil, winCallError(callErr, "ClientToScreen failed")
 	}
-	return full.Crop(region)
+	left, ok := checkedAddInt(int(p.X), region.Left)
+	if !ok {
+		return nil, ErrInvalidArgument
+	}
+	top, ok := checkedAddInt(int(p.Y), region.Top)
+	if !ok {
+		return nil, ErrInvalidArgument
+	}
+	right, ok := checkedAddInt(int(p.X), region.Right)
+	if !ok {
+		return nil, ErrInvalidArgument
+	}
+	bottom, ok := checkedAddInt(int(p.Y), region.Bottom)
+	if !ok {
+		return nil, ErrInvalidArgument
+	}
+	return CaptureScreen(Rect{left, top, right, bottom})
 }
 
 type CaptureMethod uint8
@@ -252,6 +249,10 @@ func winCallError(callErr error, operation string) error {
 }
 
 func capturePrintWindow(hwnd HWND, w, h int, client bool) (*Bitmap, error) {
+	return capturePrintWindowRegion(hwnd, w, h, client, Rect{0, 0, w, h})
+}
+
+func capturePrintWindowRegion(hwnd HWND, w, h int, client bool, region Rect) (*Bitmap, error) {
 	dst, bits, cleanup, err := makeDIB(w, h)
 	if err != nil {
 		return nil, err
@@ -267,7 +268,7 @@ func capturePrintWindow(hwnd HWND, w, h int, client bool) (*Bitmap, error) {
 	if ret, _, callErr := procPrintWindow.Call(uintptr(hwnd), dst, flags); ret == 0 {
 		return nil, winCallError(callErr, "PrintWindow failed")
 	}
-	return dibToBitmap(bits, w, h)
+	return dibRegionToBitmap(bits, w, h, region)
 }
 
 func captureFromDC(src uintptr, left, top, w, h int) (*Bitmap, error) {
@@ -305,6 +306,9 @@ func makeDIB(w, h int) (uintptr, unsafe.Pointer, func(), error) {
 	var bits unsafe.Pointer
 	hb, _, callErr := procCreateDIBSection.Call(dc, uintptr(unsafe.Pointer(&bi)), dibRGBColors, uintptr(unsafe.Pointer(&bits)), 0, 0)
 	if hb == 0 || bits == nil {
+		if hb != 0 {
+			procDeleteObject.Call(hb)
+		}
 		procDeleteDC.Call(dc)
 		return 0, nil, func() {}, winCallError(callErr, "CreateDIBSection failed")
 	}
@@ -315,30 +319,49 @@ func makeDIB(w, h int) (uintptr, unsafe.Pointer, func(), error) {
 		return 0, nil, func() {}, winCallError(callErr, "SelectObject failed")
 	}
 	cleanup := func() {
-		if old != 0 {
-			procSelectObject.Call(dc, old)
+		restored, _, _ := procSelectObject.Call(dc, old)
+		if restored != 0 && restored != ^uintptr(0) {
+			procDeleteObject.Call(hb)
+			procDeleteDC.Call(dc)
+			return
 		}
-		procDeleteObject.Call(hb)
+		// A selected bitmap cannot be deleted. If restoration failed, destroy
+		// the memory DC first and then release the no-longer-selected bitmap.
 		procDeleteDC.Call(dc)
+		procDeleteObject.Call(hb)
 	}
 	runtime.KeepAlive(bi)
 	return dc, bits, cleanup, nil
 }
 func dibToBitmap(bits unsafe.Pointer, w, h int) (*Bitmap, error) {
-	b, err := NewBitmap(w, h)
-	if err != nil || bits == nil {
-		if err == nil {
-			err = ErrInvalidArgument
-		}
-		return nil, err
+	return dibRegionToBitmap(bits, w, h, Rect{0, 0, w, h})
+}
+
+func dibRegionToBitmap(bits unsafe.Pointer, sourceWidth, sourceHeight int, region Rect) (*Bitmap, error) {
+	if bits == nil {
+		return nil, ErrInvalidArgument
 	}
-	bytes, ok := bitmapByteLen(w, h)
-	if !ok {
+	sourceBytes, ok := bitmapByteLen(sourceWidth, sourceHeight)
+	if !ok || sourceBytes > maxBitmapBytes {
 		return nil, ErrInvalidRect
 	}
-	src := unsafe.Slice((*byte)(bits), bytes)
-	for i := 0; i < w*h; i++ {
-		b.Pixels[i*4], b.Pixels[i*4+1], b.Pixels[i*4+2], b.Pixels[i*4+3] = src[i*4+2], src[i*4+1], src[i*4], 255
+	if region.Empty() || region.Left < 0 || region.Top < 0 || region.Right > sourceWidth || region.Bottom > sourceHeight {
+		return nil, ErrInvalidRect
+	}
+	b, err := NewBitmap(region.Width(), region.Height())
+	if err != nil {
+		return nil, err
+	}
+	src := unsafe.Slice((*byte)(bits), sourceBytes)
+	rowBytes := b.Width * 4
+	for y := 0; y < b.Height; y++ {
+		sourceOffset := ((region.Top+y)*sourceWidth + region.Left) * 4
+		destinationOffset := y * rowBytes
+		copy(b.Pixels[destinationOffset:destinationOffset+rowBytes], src[sourceOffset:sourceOffset+rowBytes])
+	}
+	for i := 0; i < len(b.Pixels); i += 4 {
+		b.Pixels[i], b.Pixels[i+2] = b.Pixels[i+2], b.Pixels[i]
+		b.Pixels[i+3] = 255
 	}
 	return b, nil
 }

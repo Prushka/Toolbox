@@ -62,13 +62,17 @@ func SearchPixel(b *Bitmap, start, end Point, want RGB, tolerance ColorTolerance
 		}
 	}
 	for y := start.Y; ; y += dy {
+		i := (y*b.Width + start.X) * 4
 		for x := start.X; ; x += dx {
-			if b.rgbAtUnchecked(x, y).Matches(want, tolerance) {
+			if abs(b.Pixels[i], want.R) <= tolerance.R &&
+				abs(b.Pixels[i+1], want.G) <= tolerance.G &&
+				abs(b.Pixels[i+2], want.B) <= tolerance.B {
 				return Point{x, y}, true
 			}
 			if x == end.X {
 				break
 			}
+			i += dx * 4
 		}
 		if y == end.Y {
 			break
@@ -86,8 +90,20 @@ func SearchPixelRect(b *Bitmap, region Rect, want RGB, tolerance ColorTolerance)
 		region = Rect{0, 0, b.Width, b.Height}
 	}
 	region = region.Normalize()
-	if region.Empty() {
+	if region.Empty() || region.Right <= 0 || region.Bottom <= 0 || region.Left >= b.Width || region.Top >= b.Height {
 		return Point{}, false
+	}
+	if region.Left < 0 {
+		region.Left = 0
+	}
+	if region.Top < 0 {
+		region.Top = 0
+	}
+	if region.Right > b.Width {
+		region.Right = b.Width
+	}
+	if region.Bottom > b.Height {
+		region.Bottom = b.Height
 	}
 	return SearchPixel(b, Point{region.Left, region.Top}, Point{region.Right - 1, region.Bottom - 1}, want, tolerance)
 }
@@ -170,10 +186,13 @@ func (w Window) SearchImageFileSpec(region Rect, spec string) (Point, bool, erro
 }
 
 func searchOrigin(r Rect) Point {
-	if r.Empty() {
+	if r == (Rect{}) {
 		return Point{}
 	}
 	r = r.Normalize()
+	if r.Empty() {
+		return Point{}
+	}
 	if r.Left < 0 {
 		r.Left = 0
 	}
@@ -209,20 +228,30 @@ func WaitUntil(ctx context.Context, interval time.Duration, predicate func() (bo
 	if interval <= 0 {
 		interval = time.Millisecond
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ok, err := predicate()
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		ok, err := predicate()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+		ok, err = predicate()
 		if err != nil {
 			return err
 		}
 		if ok {
 			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
 		}
 	}
 }

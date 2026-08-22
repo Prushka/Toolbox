@@ -3,12 +3,15 @@ package automation
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/tiff"
@@ -59,28 +62,60 @@ func cloneImageSearchOptions(o ImageSearchOptions) ImageSearchOptions {
 }
 
 func LoadTemplate(path string, o ImageSearchOptions) (*Template, error) {
-	img, e := LoadImage(path)
-	if e != nil {
-		return nil, e
+	img, err := loadImage(path)
+	if err != nil {
+		return nil, err
 	}
 	return CompileTemplate(img, o)
+}
+
+func loadImage(path string) (image.Image, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	config, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return nil, err
+	}
+	bytes, ok := bitmapByteLen(config.Width, config.Height)
+	if !ok || bytes > maxTemplateBytes {
+		return nil, ErrInvalidRect
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	img, _, err := image.Decode(f)
+	if err != nil {
+		return nil, err
+	}
+	bounds := img.Bounds()
+	bytes, ok = bitmapByteLen(bounds.Dx(), bounds.Dy())
+	if !ok || bytes > maxTemplateBytes {
+		return nil, ErrInvalidRect
+	}
+	return img, nil
 }
 
 // ParseImageSearchOptions accepts AHK-style options such as "*42 *TransBlack
 // *w100 *h-1". The returned filename is the remaining, unparsed text.
 func ParseImageSearchOptions(spec string) (ImageSearchOptions, string, error) {
 	var o ImageSearchOptions
-	fields := strings.Fields(spec)
-	cut := 0
-	for cut < len(fields) && strings.HasPrefix(strings.ToLower(fields[cut]), "*") {
-		t := fields[cut]
+	rest := strings.TrimLeftFunc(spec, unicode.IsSpace)
+	for strings.HasPrefix(rest, "*") {
+		end := strings.IndexFunc(rest, unicode.IsSpace)
+		if end < 0 {
+			end = len(rest)
+		}
+		t := rest[:end]
 		low := strings.ToLower(t)
 		if n, err := strconv.Atoi(t[1:]); err == nil {
 			if n < 0 || n > 255 {
 				return o, "", fmt.Errorf("variation out of range: %d", n)
 			}
 			o.Variation = uint8(n)
-			cut++
+			rest = strings.TrimLeftFunc(rest[end:], unicode.IsSpace)
 			continue
 		}
 		switch {
@@ -108,9 +143,9 @@ func ParseImageSearchOptions(spec string) (ImageSearchOptions, string, error) {
 		default:
 			return o, "", fmt.Errorf("unsupported ImageSearch option %q", t)
 		}
-		cut++
+		rest = strings.TrimLeftFunc(rest[end:], unicode.IsSpace)
 	}
-	path := strings.Join(fields[cut:], " ")
+	path := strings.TrimSpace(rest)
 	if len(path) >= 2 && path[0] == '"' && path[len(path)-1] == '"' {
 		path = path[1 : len(path)-1]
 	}
@@ -172,22 +207,16 @@ func namedColor(v string) (RGB, bool) {
 
 // LoadImage decodes PNG, JPEG, GIF and other formats registered with image.
 func LoadImage(path string) (image.Image, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	img, _, err := image.Decode(f)
-	return img, err
+	return loadImage(path)
 }
 
 // SearchImageFile finds the first top-left match in row-major order.
 func SearchImageFile(source *Bitmap, region Rect, path string, options ImageSearchOptions) (Point, bool, error) {
-	img, err := LoadImage(path)
+	template, err := LoadTemplate(path, options)
 	if err != nil {
 		return Point{}, false, err
 	}
-	return SearchImage(source, region, img, options)
+	return SearchTemplate(source, region, template)
 }
 
 // SearchImageFileSpec accepts one AHK-style ImageFile string containing both
@@ -251,9 +280,17 @@ func SearchTemplate(source *Bitmap, region Rect, template *Template) (Point, boo
 		return Point{}, false, nil
 	}
 	maxX, maxY := region.Right-t.Width, region.Bottom-t.Height
+	if maxX < region.Left || maxY < region.Top {
+		return Point{}, false, nil
+	}
+	if len(t.Anchors) == 0 {
+		return Point{region.Left, region.Top}, true, nil
+	}
+	tolerance := Tolerance(o.Variation)
+	exact := tolerance == (ColorTolerance{})
 	for y := region.Top; y <= maxY; y++ {
 		for x := region.Left; x <= maxX; x++ {
-			if imageAt(source, x, y, t, o) {
+			if imageAt(source, x, y, t, tolerance, exact) {
 				return Point{x, y}, true, nil
 			}
 		}
@@ -311,14 +348,14 @@ func imageToTemplate(src image.Image, o ImageSearchOptions) (templateBitmap, err
 			if h != sourceHeight {
 				sy = scaleIndex(y, sourceHeight, h)
 			}
-			r, g, bl, a := src.At(b.Min.X+sx, b.Min.Y+sy).RGBA()
+			c := color.NRGBAModel.Convert(src.At(b.Min.X+sx, b.Min.Y+sy)).(color.NRGBA)
 			i := (y*w + x) * 3
-			c := RGB{uint8(r >> 8), uint8(g >> 8), uint8(bl >> 8)}
-			alpha := uint8(a >> 8)
-			if o.Transparent != nil && c == *o.Transparent {
+			rgb := RGB{c.R, c.G, c.B}
+			alpha := c.A
+			if o.Transparent != nil && rgb == *o.Transparent {
 				alpha = 0
 			}
-			t.Pixels[i], t.Pixels[i+1], t.Pixels[i+2], t.Alpha[y*w+x] = c.R, c.G, c.B, alpha
+			t.Pixels[i], t.Pixels[i+1], t.Pixels[i+2], t.Alpha[y*w+x] = rgb.R, rgb.G, rgb.B, alpha
 		}
 	}
 	eligibleCount := 0
@@ -398,34 +435,40 @@ func max(a, b int) int {
 	}
 	return b
 }
-func imageAt(s *Bitmap, x, y int, t templateBitmap, o ImageSearchOptions) bool {
+func imageAt(s *Bitmap, x, y int, t templateBitmap, tolerance ColorTolerance, exact bool) bool {
 	for _, ti := range t.Anchors {
 		tx, ty := ti%t.Width, ti/t.Width
-		if !templatePixelMatches(s.rgbAtUnchecked(x+tx, y+ty), t, ti, o) {
+		si := ((y+ty)*s.Width + x + tx) * 4
+		if !templatePixelMatches(s.Pixels, si, t.Pixels, ti*3, tolerance, exact) {
 			return false
 		}
 	}
+	anchorSlot := 0
+	ti := 0
 	for ty := 0; ty < t.Height; ty++ {
+		si := ((y+ty)*s.Width + x) * 4
 		for tx := 0; tx < t.Width; tx++ {
-			ti := (ty*t.Width + tx)
-			if t.Alpha[ti] == 0 {
-				continue
-			}
-			if !templatePixelMatches(s.rgbAtUnchecked(x+tx, y+ty), t, ti, o) {
+			if anchorSlot < len(t.Anchors) && ti == t.Anchors[anchorSlot] {
+				anchorSlot++
+			} else if t.Alpha[ti] != 0 && !templatePixelMatches(s.Pixels, si, t.Pixels, ti*3, tolerance, exact) {
 				return false
 			}
+			ti++
+			si += 4
 		}
 	}
 	return true
 }
 
-func templatePixelMatches(c RGB, t templateBitmap, ti int, o ImageSearchOptions) bool {
-	if t.Alpha[ti] == 0 {
-		return true
+func templatePixelMatches(source []byte, sourceIndex int, template []byte, templateIndex int, tolerance ColorTolerance, exact bool) bool {
+	if exact {
+		return source[sourceIndex] == template[templateIndex] &&
+			source[sourceIndex+1] == template[templateIndex+1] &&
+			source[sourceIndex+2] == template[templateIndex+2]
 	}
-	i := ti * 3
-	tc := RGB{t.Pixels[i], t.Pixels[i+1], t.Pixels[i+2]}
-	return c.Matches(tc, Tolerance(o.Variation))
+	return abs(source[sourceIndex], template[templateIndex]) <= tolerance.R &&
+		abs(source[sourceIndex+1], template[templateIndex+1]) <= tolerance.G &&
+		abs(source[sourceIndex+2], template[templateIndex+2]) <= tolerance.B
 }
 
 // Register the standard decoders explicitly for callers that use a custom

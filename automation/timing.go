@@ -76,6 +76,14 @@ func JitterSleep(ctx context.Context, d, minus, plus time.Duration, r *rand.Rand
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	duration, err := jitterDuration(d, minus, plus, r)
+	if err != nil {
+		return err
+	}
+	return Sleep(ctx, duration)
+}
+
+func jitterDuration(d, minus, plus time.Duration, r *rand.Rand) (time.Duration, error) {
 	if minus < 0 {
 		minus = 0
 	}
@@ -83,25 +91,34 @@ func JitterSleep(ctx context.Context, d, minus, plus time.Duration, r *rand.Rand
 		plus = 0
 	}
 	maxDuration := time.Duration(1<<63 - 1)
+	var upper time.Duration
+	if d >= 0 {
+		if d > maxDuration-plus {
+			return 0, ErrInvalidArgument
+		}
+		upper = d + plus
+	} else {
+		upper = d + plus
+		if upper < 0 {
+			upper = 0
+		}
+	}
 	lo := time.Duration(0)
-	if d > 0 && minus < d {
+	if d > minus {
 		lo = d - minus
 	}
-	if minus > maxDuration-plus {
-		return ErrInvalidArgument
+	if upper < lo {
+		return 0, ErrInvalidArgument
 	}
-	span := minus + plus
-	if lo > maxDuration-span {
-		return ErrInvalidArgument
-	}
+	span := upper - lo
 	delta := time.Duration(0)
 	if span > 0 {
 		if span == maxDuration {
 			if r == nil {
-				delta = time.Duration(rand.Int63())
+				delta = time.Duration(rand.Uint64() >> 1)
 			} else {
 				jitterRandMu.Lock()
-				delta = time.Duration(r.Int63())
+				delta = time.Duration(r.Uint64() >> 1)
 				jitterRandMu.Unlock()
 			}
 		} else if r == nil {
@@ -113,9 +130,9 @@ func JitterSleep(ctx context.Context, d, minus, plus time.Duration, r *rand.Rand
 		}
 	}
 	if lo > maxDuration-delta {
-		return ErrInvalidArgument
+		return 0, ErrInvalidArgument
 	}
-	return Sleep(ctx, lo+delta)
+	return lo + delta, nil
 }
 
 // TimerResolution requests the Windows multimedia timer period. On other

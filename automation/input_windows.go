@@ -2,6 +2,8 @@
 
 package automation
 
+import "syscall"
+
 var (
 	procGetAsyncKeyState = user32.NewProc("GetAsyncKeyState")
 	procGetKeyState      = user32.NewProc("GetKeyState")
@@ -17,8 +19,12 @@ func IsKeyDown(key Key) (bool, error) {
 	if !key.Valid() {
 		return false, ErrInvalidArgument
 	}
-	state, _, _ := procGetAsyncKeyState.Call(uintptr(key))
-	return uint16(state)&0x8000 != 0, nil
+	return asyncKeyDown(key), nil
+}
+
+func asyncKeyDown(key Key) bool {
+	state, _, _ := syscall.Syscall(procGetAsyncKeyState.Addr(), 1, uintptr(key), 0, 0)
+	return uint16(state)&0x8000 != 0
 }
 
 // KeyToggleOn reports the toggle state exposed by GetKeyState. It is normally
@@ -27,7 +33,7 @@ func KeyToggleOn(key Key) (bool, error) {
 	if !key.Valid() {
 		return false, ErrInvalidArgument
 	}
-	state, _, _ := procGetKeyState.Call(uintptr(key))
+	state, _, _ := syscall.Syscall(procGetKeyState.Addr(), 1, uintptr(key), 0, 0)
 	return uint16(state)&1 != 0, nil
 }
 
@@ -35,10 +41,7 @@ func KeyToggleOn(key Key) (bool, error) {
 // keys are read once. Multi-key snapshots are sampled sequentially because
 // Windows provides no atomic GetAsyncKeyState batch operation.
 func PollInput(keys ...Key) (InputSnapshot, error) {
-	return makeInputSnapshot(keys, func(key Key) bool {
-		state, _, _ := procGetAsyncKeyState.Call(uintptr(key))
-		return uint16(state)&0x8000 != 0
-	})
+	return makeInputSnapshot(keys, asyncKeyDown)
 }
 
 // MouseButtonKey resolves a logical mouse button to the physical virtual key
@@ -46,7 +49,7 @@ func PollInput(keys ...Key) (InputSnapshot, error) {
 func MouseButtonKey(button MouseButton) (Key, error) {
 	switch button {
 	case MousePrimary, MouseSecondary:
-		swapped, _, _ := procGetSystemMetrics.Call(smSwapButton)
+		swapped, _, _ := syscall.Syscall(procGetSystemMetrics.Addr(), 1, smSwapButton, 0, 0)
 		if (button == MousePrimary) != (swapped == 0) {
 			return KeyRButton, nil
 		}

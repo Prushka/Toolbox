@@ -126,3 +126,12 @@ func TestInputSnapshotRejectsInvalidKeys(t *testing.T) {
 		t.Fatal("reader called before validation completed")
 	}
 }
+
+func BenchmarkInputSnapshot(b *testing.B) {
+	keys := []Key{KeyCtrl, KeyShift, KeyF8, KeyLButton}
+	read := func(Key) bool { return false }
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = makeInputSnapshot(keys, read)
+	}
+}

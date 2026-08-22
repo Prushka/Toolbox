@@ -56,6 +56,54 @@ func TestWindowsCaptureAndDisplayQueries(t *testing.T) {
 	}
 }
 
+func TestWindowsDIBRegionConversion(t *testing.T) {
+	const sourceWidth, sourceHeight = 4, 3
+	native := []byte{
+		1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 10, 11, 12, 0,
+		13, 14, 15, 0, 16, 17, 18, 0, 19, 20, 21, 0, 22, 23, 24, 0,
+		25, 26, 27, 0, 28, 29, 30, 0, 31, 32, 33, 0, 34, 35, 36, 0,
+	}
+	b, err := dibRegionToBitmap(unsafe.Pointer(&native[0]), sourceWidth, sourceHeight, Rect{1, 1, 3, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Width != 2 || b.Height != 2 {
+		t.Fatalf("region bitmap=%dx%d", b.Width, b.Height)
+	}
+	want := []RGB{{18, 17, 16}, {21, 20, 19}, {30, 29, 28}, {33, 32, 31}}
+	for i, color := range want {
+		if got := b.RGBAt(i%2, i/2); got != color {
+			t.Errorf("pixel %d=%v, want %v", i, got, color)
+		}
+	}
+}
+
+func TestWindowsDIBRegionConversionRejectsInvalidGeometry(t *testing.T) {
+	native := []byte{1, 2, 3, 0}
+	tests := []struct {
+		name   string
+		bits   unsafe.Pointer
+		width  int
+		height int
+		region Rect
+		want   error
+	}{
+		{name: "nil bits", width: 1, height: 1, region: Rect{0, 0, 1, 1}, want: ErrInvalidArgument},
+		{name: "zero source width", bits: unsafe.Pointer(&native[0]), height: 1, region: Rect{0, 0, 1, 1}, want: ErrInvalidRect},
+		{name: "empty region", bits: unsafe.Pointer(&native[0]), width: 1, height: 1, region: Rect{}, want: ErrInvalidRect},
+		{name: "reversed region", bits: unsafe.Pointer(&native[0]), width: 1, height: 1, region: Rect{1, 1, 0, 0}, want: ErrInvalidRect},
+		{name: "negative origin", bits: unsafe.Pointer(&native[0]), width: 1, height: 1, region: Rect{-1, 0, 1, 1}, want: ErrInvalidRect},
+		{name: "outside source", bits: unsafe.Pointer(&native[0]), width: 1, height: 1, region: Rect{0, 0, 2, 1}, want: ErrInvalidRect},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := dibRegionToBitmap(tt.bits, tt.width, tt.height, tt.region); !errors.Is(err, tt.want) {
+				t.Fatalf("dibRegionToBitmap error=%v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestWindowsAndWindowQueries(t *testing.T) {
 	ws, e := FindWindows(WindowQuery{})
 	if e != nil {
@@ -125,8 +173,10 @@ func TestWindowsRejectsInvalidArguments(t *testing.T) {
 	if _, err := CaptureWindow(HWND(1), CaptureOptions{Method: CaptureMethod(255)}); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("invalid capture method=%v", err)
 	}
-	if _, err := CaptureScreen(Rect{maxInt - 1, 0, maxInt, 1}); !errors.Is(err, ErrInvalidArgument) {
-		t.Fatalf("invalid screen rectangle=%v", err)
+	if unsafe.Sizeof(int(0)) > 4 {
+		if _, err := CaptureScreen(Rect{maxInt - 1, 0, maxInt, 1}); !errors.Is(err, ErrInvalidArgument) {
+			t.Fatalf("invalid screen rectangle=%v", err)
+		}
 	}
 	if _, _, _, err := makeDIB(1<<30, 1); !errors.Is(err, ErrInvalidRect) {
 		t.Fatalf("oversized DIB=%v", err)
@@ -191,6 +241,13 @@ func TestWindowsInputPolling(t *testing.T) {
 	}
 }
 
+func BenchmarkPollInput(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = PollInput(KeyCtrl, KeyShift, KeyF8, KeyLButton)
+	}
+}
+
 func TestSetDPIAwareConcurrent(t *testing.T) {
 	const n = 32
 	var wg sync.WaitGroup
@@ -208,5 +265,45 @@ func TestSetDPIAwareConcurrent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestWindowsEnumerationConcurrent(t *testing.T) {
+	const workers = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for iteration := 0; iteration < 8; iteration++ {
+				if worker%2 == 0 {
+					windows, err := FindWindows(WindowQuery{})
+					if err != nil {
+						errs <- err
+						return
+					}
+					if len(windows) == 0 {
+						errs <- errors.New("no top-level windows")
+						return
+					}
+					continue
+				}
+				monitors, err := Monitors()
+				if err != nil {
+					errs <- err
+					return
+				}
+				if len(monitors) == 0 {
+					errs <- errors.New("no monitors")
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
 	}
 }

@@ -125,8 +125,9 @@ func abs(a, b uint8) uint8 {
 	return b - a
 }
 
-// Bitmap stores tightly packed RGBA pixels. Reads and writes are safe only
-// when callers do not mutate the bitmap concurrently.
+// Bitmap stores tightly packed RGBA pixels. The alpha byte is storage padding:
+// Bitmap image operations and PNG output are always opaque. Reads and writes
+// are safe only when callers do not mutate the bitmap concurrently.
 type Bitmap struct {
 	Width, Height int
 	Pixels        []byte
@@ -156,10 +157,11 @@ func (b *Bitmap) boundsOK(x, y int) bool {
 	if b == nil || x < 0 || y < 0 || x >= b.Width || y >= b.Height {
 		return false
 	}
-	if y > (int(^uint(0)>>1))/b.Width {
+	row, ok := checkedMulInt(y, b.Width)
+	if !ok || x > maxInt-row {
 		return false
 	}
-	pixel := y*b.Width + x
+	pixel := row + x
 	return pixel <= maxInt/4 && pixel < len(b.Pixels)/4
 }
 func (b *Bitmap) valid() bool {
@@ -191,7 +193,7 @@ func (b *Bitmap) At(x, y int) color.Color {
 	if !b.boundsOK(x, y) {
 		return color.RGBA{}
 	}
-	return b.RGBAt(x, y).RGBA()
+	return b.rgbAtUnchecked(x, y).RGBA()
 }
 func (b *Bitmap) Set(x, y int, c RGB) {
 	if !b.boundsOK(x, y) {
@@ -208,10 +210,11 @@ func (b *Bitmap) Set(x, y int, c RGB) {
 	b.Pixels[i], b.Pixels[i+1], b.Pixels[i+2], b.Pixels[i+3] = c.R, c.G, c.B, 255
 }
 func (b *Bitmap) Clone() *Bitmap {
-	if b == nil {
+	if !b.valid() {
 		return nil
 	}
-	p := append([]byte(nil), b.Pixels...)
+	bytes, _ := bitmapByteLen(b.Width, b.Height)
+	p := append([]byte(nil), b.Pixels[:bytes]...)
 	return &Bitmap{b.Width, b.Height, p}
 }
 func (b *Bitmap) Crop(r Rect) (*Bitmap, error) {
@@ -243,9 +246,13 @@ func (b *Bitmap) Crop(r Rect) (*Bitmap, error) {
 	if r.Empty() {
 		return nil, ErrInvalidRect
 	}
-	out, _ := NewBitmap(r.Width(), r.Height())
-	for y := 0; y < r.Height(); y++ {
-		copy(out.Pixels[y*out.Width*4:(y+1)*out.Width*4], b.Pixels[((r.Top+y)*b.Width+r.Left)*4:((r.Top+y)*b.Width+r.Right)*4])
+	outWidth, outHeight := r.Width(), r.Height()
+	out, _ := NewBitmap(outWidth, outHeight)
+	rowBytes := outWidth * 4
+	sourceOffset := (r.Top*b.Width + r.Left) * 4
+	for y := 0; y < outHeight; y++ {
+		copy(out.Pixels[y*rowBytes:(y+1)*rowBytes], b.Pixels[sourceOffset:sourceOffset+rowBytes])
+		sourceOffset += b.Width * 4
 	}
 	return out, nil
 }
@@ -258,7 +265,7 @@ type PixelExpectation struct {
 
 func (b *Bitmap) MatchesAll(expectations ...PixelExpectation) bool {
 	for _, e := range expectations {
-		if !b.boundsOK(e.Point.X, e.Point.Y) || !b.RGBAt(e.Point.X, e.Point.Y).Matches(e.Color, e.Tolerance) {
+		if !b.boundsOK(e.Point.X, e.Point.Y) || !b.rgbAtUnchecked(e.Point.X, e.Point.Y).Matches(e.Color, e.Tolerance) {
 			return false
 		}
 	}
@@ -268,7 +275,23 @@ func (b *Bitmap) WritePNG(w io.Writer) error {
 	if b == nil || !b.valid() || w == nil {
 		return ErrInvalidArgument
 	}
-	return png.Encode(w, b)
+	pixels := b.Pixels[:b.Width*b.Height*4]
+	for i := 3; i < len(pixels); i += 4 {
+		if pixels[i] == 255 {
+			continue
+		}
+		pixels = append([]byte(nil), pixels...)
+		for alpha := 3; alpha < len(pixels); alpha += 4 {
+			pixels[alpha] = 255
+		}
+		break
+	}
+	rgba := &image.RGBA{
+		Pix:    pixels,
+		Stride: b.Width * 4,
+		Rect:   image.Rect(0, 0, b.Width, b.Height),
+	}
+	return png.Encode(w, rgba)
 }
 func (b *Bitmap) SavePNG(path string) (err error) {
 	if b == nil || !b.valid() {

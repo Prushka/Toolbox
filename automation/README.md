@@ -108,6 +108,10 @@ same variation to all channels. `RGB.Matches` is inclusive on every channel.
 `Bitmap` is a tightly packed RGBA image with public `Width`, `Height`, and
 `Pixels` fields. It implements `image.Image`, supports `RGBAt`, `Set`,
 `Clone`, `Crop`, `MatchesAll`, and PNG output through `WritePNG`/`SavePNG`.
+The fourth byte is storage padding: bitmap image operations and PNG output are
+always opaque, matching screen-capture semantics. `WritePNG` uses the backing
+pixels directly when their alpha bytes are already 255 and otherwise
+normalizes a private copy without mutating the bitmap.
 Bitmap and capture dimensions are overflow-checked and capped at 512 MiB to
 avoid malformed input or unreasonable allocations. `RGBAt` and `Set` quietly
 ignore out-of-range coordinates; constructors and operations that must report
@@ -203,10 +207,12 @@ Accepted color names are `Black`, `White`, `Red`, `Green`, `Blue`, `Yellow`,
 options and unquoted path. It rejects unknown options rather than silently
 changing matching behavior.
 
-`LoadImage` decodes images registered with Go's `image` package, including
-PNG, JPEG, GIF, BMP, and TIFF. `SearchImage` is the convenient one-off API;
-it compiles every call. For polling, use `CompileTemplate` or `LoadTemplate`
-once, then call `SearchTemplate`:
+`LoadImage` and `LoadTemplate` decode formats registered with Go's `image`
+package, including PNG, JPEG, GIF, BMP, and TIFF. Both preflight the encoded
+dimensions before full decoding, reject decoded storage above 256 MiB, and
+revalidate the decoded bounds. `SearchImage` is the convenient one-off API; it
+compiles every call. For polling, use `CompileTemplate` or `LoadTemplate` once,
+then call `SearchTemplate`:
 
 ```go
 transparent := automation.RGB{R: 255, G: 0, B: 255}
@@ -225,7 +231,7 @@ and alpha-zero source pixels into a wildcard mask, chooses a small set of
 opaque anchor pixels for early rejection, and makes a private copy of option
 state. A `Template` is immutable and safe to share among concurrent searches.
 Search returns the first top-left match in row-major order. Template
-allocations are overflow-checked and capped at 256 MiB.
+allocations are also overflow-checked and capped at 256 MiB.
 
 The hot `SearchTemplate` path has no allocations: it scans source bytes
 directly, checks anchors first, then checks all opaque template pixels. Its
@@ -285,6 +291,9 @@ monitor's full rectangle, work area, and primary flag.
 settings APIs. `SetDisplayMode` validates dimensions and optional
 bits-per-pixel/frequency values before the call. Its `permanent` argument
 requests registry persistence; a temporary mode lasts for the session.
+`DisplayModes` deduplicates driver results and bounds enumeration at 4096
+entries, returning an error instead of looping forever or returning a silently
+truncated list if a driver never reports completion.
 Changing display mode is a system-wide side effect and must be an explicit
 caller decision. `RestoreDisplayMode` requests the saved/default configuration.
 
@@ -299,7 +308,7 @@ returned to the caller.
 | --- | --- |
 | `Sleep(ctx, d)` | Context-aware sleep. A non-positive duration returns after checking cancellation. |
 | `PreciseSleep(ctx, d)` | Sleeps for most of the duration and yields in a final roughly 2 ms window to reduce scheduler overshoot. This uses bounded CPU near the deadline and does not alter system timer resolution. |
-| `JitterSleep(ctx, d, minus, plus, rng)` | Sleeps for a uniformly selected duration derived from `d`, `minus`, and `plus`, clamping a negative lower bound to zero and validating overflow. Jitter is caller-directed scheduling behavior, not a claim of invisibility. |
+| `JitterSleep(ctx, d, minus, plus, rng)` | Sleeps for a uniformly selected duration in `[max(0,d-minus), max(0,d+plus)]`. Negative jitter values are treated as zero and positive overflow is rejected. Jitter is caller-directed scheduling behavior, not a claim of invisibility. |
 | `WaitUntil(ctx, interval, predicate)` | Evaluates immediately, then reuses one ticker between evaluations. It never busy-waits, stops promptly on cancellation, and propagates predicate errors. |
 | `BeginTimerResolution(period)` | Acquires a WinMM timer-resolution lease (zero requests the 1 ms default). Always `defer lease.Close()`; close is idempotent. |
 

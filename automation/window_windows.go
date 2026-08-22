@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -91,8 +92,9 @@ func processPath(pid uint32) string {
 		return ""
 	}
 	defer procCloseHandle.Call(h)
-	for size := uint32(256); size <= 32768; size *= 2 {
-		buf := make([]uint16, size)
+	buf := make([]uint16, 260)
+	for {
+		size := uint32(len(buf))
 		n := size
 		ret, _, callErr := procQueryFullProcessImageName.Call(h, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&n)))
 		if ret != 0 {
@@ -101,8 +103,11 @@ func processPath(pid uint32) string {
 		if callErr != windows.ERROR_INSUFFICIENT_BUFFER {
 			return ""
 		}
+		if len(buf) == 32768 {
+			return ""
+		}
+		buf = make([]uint16, min(len(buf)*2, 32768))
 	}
-	return ""
 }
 func (w Window) Rect() (Rect, error) {
 	if !w.Valid() {
@@ -295,53 +300,99 @@ func FindWindows(q WindowQuery) ([]Window, error) {
 	return findWindows(q, false)
 }
 
-func findWindows(q WindowQuery, firstOnly bool) ([]Window, error) {
-	titleContains := strings.ToLower(q.TitleContains)
-	var out []Window
-	stopped := false
-	cb := windows.NewCallback(func(hwnd uintptr, lparam uintptr) uintptr {
-		w := Window{HWND(hwnd)}
-		if q.VisibleOnly && !w.IsVisible() {
+type windowEnumState struct {
+	query         WindowQuery
+	titleContains string
+	processPaths  map[uint32]string
+	windows       []Window
+	firstOnly     bool
+	stopped       bool
+}
+
+var (
+	callbackStateID atomic.Uintptr
+	callbackStates  sync.Map
+)
+
+func registerCallbackState(state any) (uintptr, func()) {
+	for {
+		id := callbackStateID.Add(1)
+		if id == 0 {
+			continue
+		}
+		if _, loaded := callbackStates.LoadOrStore(id, state); !loaded {
+			return id, func() { callbackStates.Delete(id) }
+		}
+	}
+}
+
+var enumWindowsCallback = windows.NewCallback(func(hwnd uintptr, lparam uintptr) uintptr {
+	value, ok := callbackStates.Load(lparam)
+	if !ok {
+		return 0
+	}
+	state, ok := value.(*windowEnumState)
+	if !ok {
+		return 0
+	}
+	w := Window{HWND(hwnd)}
+	q := state.query
+	if q.VisibleOnly && !w.IsVisible() {
+		return 1
+	}
+	pid := uint32(0)
+	if q.PID != 0 {
+		pid = w.PID()
+		if pid != q.PID {
 			return 1
 		}
-		pid := uint32(0)
-		if q.PID != 0 || q.Process != "" {
+	}
+	title := ""
+	if q.Title != "" || state.titleContains != "" {
+		title = w.Title()
+	}
+	if q.Title != "" && !strings.EqualFold(title, q.Title) {
+		return 1
+	}
+	if state.titleContains != "" && !strings.Contains(strings.ToLower(title), state.titleContains) {
+		return 1
+	}
+	if q.Class != "" && !strings.EqualFold(w.Class(), q.Class) {
+		return 1
+	}
+	if q.Process != "" {
+		if pid == 0 {
 			pid = w.PID()
 		}
-		if q.PID != 0 && pid != q.PID {
+		p, cached := state.processPaths[pid]
+		if !cached {
+			p = processPath(pid)
+			state.processPaths[pid] = p
+		}
+		if !strings.EqualFold(p, q.Process) && !strings.EqualFold(pathBase(p), q.Process) {
 			return 1
 		}
-		title := ""
-		if q.Title != "" || titleContains != "" {
-			title = w.Title()
-		}
-		if q.Title != "" && !strings.EqualFold(title, q.Title) {
-			return 1
-		}
-		if titleContains != "" && !strings.Contains(strings.ToLower(title), titleContains) {
-			return 1
-		}
-		if q.Class != "" && !strings.EqualFold(w.Class(), q.Class) {
-			return 1
-		}
-		if q.Process != "" {
-			p := processPath(pid)
-			if !strings.EqualFold(p, q.Process) && !strings.EqualFold(pathBase(p), q.Process) {
-				return 1
-			}
-		}
-		out = append(out, w)
-		if firstOnly {
-			stopped = true
-			return 0
-		}
-		return 1
-	})
-	ret, _, callErr := procEnumWindows.Call(cb, 0)
-	if ret == 0 && !stopped {
+	}
+	state.windows = append(state.windows, w)
+	if state.firstOnly {
+		state.stopped = true
+		return 0
+	}
+	return 1
+})
+
+func findWindows(q WindowQuery, firstOnly bool) ([]Window, error) {
+	state := &windowEnumState{query: q, titleContains: strings.ToLower(q.TitleContains), firstOnly: firstOnly}
+	if q.Process != "" {
+		state.processPaths = make(map[uint32]string)
+	}
+	stateID, unregister := registerCallbackState(state)
+	defer unregister()
+	ret, _, callErr := procEnumWindows.Call(enumWindowsCallback, stateID)
+	if ret == 0 && !state.stopped {
 		return nil, winCallError(callErr, "EnumWindows failed")
 	}
-	return out, nil
+	return state.windows, nil
 }
 func FindWindow(q WindowQuery) (Window, error) {
 	ws, e := findWindows(q, true)
@@ -370,15 +421,22 @@ func pathBase(p string) string {
 }
 func getWindowString(lenProc, getProc *windows.LazyProc, hwnd HWND) string {
 	n, _, _ := lenProc.Call(uintptr(hwnd))
-	if n == 0 || n >= uintptr(maxInt-1) {
+	const maxWindowTextChars = 32768
+	if n == 0 || n >= maxWindowTextChars {
 		return ""
 	}
-	buf := make([]uint16, n+1)
-	r, _, _ := getProc.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-	if r == 0 {
-		return ""
+	size := min(int(n)+16, maxWindowTextChars)
+	for {
+		buf := make([]uint16, size)
+		r, _, _ := getProc.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+		if r == 0 {
+			return ""
+		}
+		if r < uintptr(len(buf)-1) || size == maxWindowTextChars {
+			return windows.UTF16ToString(buf[:r])
+		}
+		size = min(size*2, maxWindowTextChars)
 	}
-	return windows.UTF16ToString(buf[:r])
 }
 func getClass(hwnd HWND) string {
 	buf := make([]uint16, 256)
