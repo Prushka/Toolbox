@@ -29,3 +29,10 @@ func TestSelectPortRequiresExactlyOne(t *testing.T) {
 		}
 	}
 }
+
+func TestActivateWindowByTitleAllowsEmptyTitle(t *testing.T) {
+	t.Parallel()
+	if err := ActivateWindowByTitle("  "); err != nil {
+		t.Fatal(err)
+	}
+}

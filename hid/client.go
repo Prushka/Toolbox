@@ -19,8 +19,9 @@ const (
 )
 
 var (
-	ErrClosed      = errors.New("hid: client is closed")
-	ErrUnsupported = errors.New("hid: operation is not supported on this platform")
+	ErrClosed             = errors.New("hid: client is closed")
+	ErrUnsupported        = errors.New("hid: operation is not supported on this platform")
+	ErrWindowPointerMoved = errors.New("hid: prepared window pointer moved")
 )
 
 // Capability describes a firmware feature.
@@ -112,6 +113,13 @@ type responseResult struct {
 	err   error
 }
 
+type windowPointerState struct {
+	valid            bool
+	screenX, screenY int
+	originX, originY int
+	clientX, clientY int
+}
+
 // Client is safe for concurrent use. Commands are serialized because the
 // firmware processes one acknowledged request at a time.
 type Client struct {
@@ -120,16 +128,21 @@ type Client struct {
 	timeout   time.Duration
 	tapDelay  time.Duration
 
-	commandMu  chan struct{}
-	sequence   byte
-	responses  chan responseResult
-	readerDone chan struct{}
-	readerOnce sync.Once
-	readErrMu  sync.RWMutex
-	readErr    error
-	closed     atomic.Bool
-	closeOnce  sync.Once
-	closeErr   error
+	commandMu       chan struct{}
+	sequence        byte
+	responses       chan responseResult
+	readerDone      chan struct{}
+	readerOnce      sync.Once
+	readErrMu       sync.RWMutex
+	readErr         error
+	closed          atomic.Bool
+	closeOnce       sync.Once
+	closeErr        error
+	infoMu          sync.RWMutex
+	info            Info
+	infoKnown       bool
+	windowPointerMu sync.Mutex
+	windowPointer   windowPointerState
 }
 
 // NewClient binds a client to an already-open byte stream. Most callers should
@@ -362,7 +375,25 @@ func (client *Client) Info(ctx context.Context) (Info, error) {
 	if info.ProtocolVersion != protocolVersion {
 		return Info{}, fmt.Errorf("hid: firmware protocol %d does not match client protocol %d", info.ProtocolVersion, protocolVersion)
 	}
+	client.infoMu.Lock()
+	client.info = info
+	client.infoKnown = true
+	client.infoMu.Unlock()
 	return info, nil
+}
+
+func (client *Client) supports(ctx context.Context, capability Capability) (bool, error) {
+	client.infoMu.RLock()
+	info, known := client.info, client.infoKnown
+	client.infoMu.RUnlock()
+	if !known {
+		var err error
+		info, err = client.Info(ctx)
+		if err != nil {
+			return false, err
+		}
+	}
+	return info.Capabilities&capability != 0, nil
 }
 
 // KeyDown holds one or more keys. A standard boot keyboard report can hold at
@@ -529,6 +560,45 @@ func (client *Client) ReleaseKeyboard(ctx context.Context) error {
 // Move moves the hardware pointer by relative HID units. Large movements are
 // split into valid signed 8-bit HID reports.
 func (client *Client) Move(ctx context.Context, dx, dy int) error {
+	client.invalidateWindowPointer()
+	return client.moveRelativeReports(ctx, dx, dy)
+}
+
+// MoveLinear moves by relative HID counts using reports no larger than four
+// counts per axis. This avoids the accelerated response that some raw-input
+// applications apply to larger reports.
+func (client *Client) MoveLinear(ctx context.Context, dx, dy int) error {
+	if ctx == nil {
+		return errors.New("hid: context is nil")
+	}
+	client.invalidateWindowPointer()
+	return client.moveLinearReports(ctx, dx, dy)
+}
+
+func (client *Client) moveLinearReports(ctx context.Context, dx, dy int) error {
+	for dx != 0 || dy != 0 {
+		x := clampLinearDelta(dx)
+		y := clampLinearDelta(dy)
+		if err := client.moveRelativeReports(ctx, x, y); err != nil {
+			return err
+		}
+		dx -= x
+		dy -= y
+	}
+	return nil
+}
+
+func clampLinearDelta(value int) int {
+	if value > 4 {
+		return 4
+	}
+	if value < -4 {
+		return -4
+	}
+	return value
+}
+
+func (client *Client) moveRelativeReports(ctx context.Context, dx, dy int) error {
 	if ctx == nil {
 		return errors.New("hid: context is nil")
 	}
@@ -548,6 +618,11 @@ func (client *Client) Move(ctx context.Context, dx, dy int) error {
 // MoveAbsolute moves immediately to normalized HID coordinates in the range
 // 0..32767. MoveTo is usually more convenient on Windows.
 func (client *Client) MoveAbsolute(ctx context.Context, x, y uint16) error {
+	client.invalidateWindowPointer()
+	return client.moveAbsoluteReport(ctx, x, y)
+}
+
+func (client *Client) moveAbsoluteReport(ctx context.Context, x, y uint16) error {
 	if x > 32767 || y > 32767 {
 		return errors.New("hid: absolute coordinates must be between 0 and 32767")
 	}
@@ -556,6 +631,35 @@ func (client *Client) MoveAbsolute(ctx context.Context, x, y uint16) error {
 	binary.LittleEndian.PutUint16(payload[2:4], y)
 	_, err := client.transact(ctx, opMouseAbs, payload)
 	return err
+}
+
+func (client *Client) invalidateWindowPointer() {
+	if client == nil {
+		return
+	}
+	client.windowPointerMu.Lock()
+	client.windowPointer.valid = false
+	client.windowPointerMu.Unlock()
+}
+
+// ResetWindowPointer discards cached raw-input pointer calibration. Call this
+// after the target application replaces or reloads its input surface; the
+// Windows cursor may be unchanged while the application's internal pointer has
+// reset.
+func (client *Client) ResetWindowPointer() {
+	client.invalidateWindowPointer()
+}
+
+func (client *Client) noteWindowCursorPosition(x, y int) {
+	if client == nil {
+		return
+	}
+	client.windowPointerMu.Lock()
+	if client.windowPointer.valid {
+		client.windowPointer.screenX = x
+		client.windowPointer.screenY = y
+	}
+	client.windowPointerMu.Unlock()
 }
 
 // Scroll scrolls vertically and horizontally. Positive vertical values scroll

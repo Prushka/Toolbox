@@ -70,10 +70,27 @@ func MoveBy(dx, dy int) Action {
 	}
 }
 
+// MoveLinearlyBy creates a relative movement action split into four-count
+// reports for raw-input applications that accelerate larger reports.
+func MoveLinearlyBy(dx, dy int) Action {
+	return func(ctx context.Context, client *Client) error {
+		return client.MoveLinear(ctx, dx, dy)
+	}
+}
+
 // JumpTo creates a Windows primary-display pixel jump action.
 func JumpTo(x, y int) Action {
 	return func(ctx context.Context, client *Client) error {
 		return client.MoveTo(ctx, x, y)
+	}
+}
+
+// ClickAt creates an action that moves to a Windows primary-display pixel and
+// clicks after raw-input consumers have settled on the final position.
+func ClickAt(x, y int, buttons ...Button) Action {
+	copied := append([]Button(nil), buttons...)
+	return func(ctx context.Context, client *Client) error {
+		return client.ClickAt(ctx, x, y, copied...)
 	}
 }
 

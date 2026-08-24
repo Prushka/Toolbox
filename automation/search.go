@@ -126,6 +126,76 @@ func RelativePoint(p Point, reference, current image.Point) Point {
 	return Point{x / reference.X, y / reference.Y}
 }
 
+// AspectFitRect returns the largest centered rectangle in current with the
+// same aspect ratio as reference. It is useful for applications that preserve
+// their logical canvas and add letterboxing or pillarboxing at other sizes.
+func AspectFitRect(reference, current image.Point) Rect {
+	if reference.X <= 0 || reference.Y <= 0 || current.X <= 0 || current.Y <= 0 {
+		return Rect{}
+	}
+	widthLimitedLeft, leftOK := checkedMulInt(current.X, reference.Y)
+	widthLimitedRight, rightOK := checkedMulInt(current.Y, reference.X)
+	if !leftOK || !rightOK {
+		return Rect{}
+	}
+	if widthLimitedLeft <= widthLimitedRight {
+		height, ok := roundedScale(reference.Y, current.X, reference.X)
+		if !ok {
+			return Rect{}
+		}
+		top := (current.Y - height) / 2
+		return Rect{Left: 0, Top: top, Right: current.X, Bottom: top + height}
+	}
+	width, ok := roundedScale(reference.X, current.Y, reference.Y)
+	if !ok {
+		return Rect{}
+	}
+	left := (current.X - width) / 2
+	return Rect{Left: left, Top: 0, Right: left + width, Bottom: current.Y}
+}
+
+// AspectFitPoint maps a point from reference coordinates into a centered,
+// uniformly scaled canvas in current. Unlike RelativePoint, it never distorts
+// one axis independently from the other.
+func AspectFitPoint(p Point, reference, current image.Point) Point {
+	fit := AspectFitRect(reference, current)
+	if fit.Empty() {
+		return Point{}
+	}
+	widthLimitedLeft, leftOK := checkedMulInt(current.X, reference.Y)
+	widthLimitedRight, rightOK := checkedMulInt(current.Y, reference.X)
+	if !leftOK || !rightOK {
+		return Point{}
+	}
+	if widthLimitedLeft <= widthLimitedRight {
+		x, xOK := roundedScale(p.X, current.X, reference.X)
+		y, yOK := roundedScale(p.Y, current.X, reference.X)
+		if !xOK || !yOK {
+			return Point{}
+		}
+		return Point{X: x, Y: fit.Top + y}
+	}
+	x, xOK := roundedScale(p.X, current.Y, reference.Y)
+	y, yOK := roundedScale(p.Y, current.Y, reference.Y)
+	if !xOK || !yOK {
+		return Point{}
+	}
+	return Point{X: fit.Left + x, Y: y}
+}
+
+func roundedScale(value, numerator, denominator int) (int, bool) {
+	scaled, ok := checkedMulInt(value, numerator)
+	if !ok {
+		return 0, false
+	}
+	half := denominator / 2
+	scaled, ok = checkedAddInt(scaled, half)
+	if !ok {
+		return 0, false
+	}
+	return scaled / denominator, true
+}
+
 func (w Window) Capture(clientOnly bool) (*Bitmap, error) {
 	return CaptureWindow(w.HWND, CaptureOptions{ClientOnly: clientOnly})
 }
@@ -135,8 +205,12 @@ func (w Window) CaptureRegion(region Rect, o CaptureOptions) (*Bitmap, error) {
 }
 func (w Window) Pixel(x, y int) (RGB, error) { return PixelColorWindow(w.HWND, x, y, true) }
 func (w Window) SearchPixel(region Rect, want RGB, t ColorTolerance) (Point, bool, error) {
+	return w.SearchPixelWithCapture(region, want, t, CaptureOptions{})
+}
+func (w Window) SearchPixelWithCapture(region Rect, want RGB, t ColorTolerance, capture CaptureOptions) (Point, bool, error) {
 	origin := searchOrigin(region)
-	b, e := w.CaptureRegion(region, CaptureOptions{ClientOnly: true})
+	capture.ClientOnly = true
+	b, e := w.CaptureRegion(region, capture)
 	if e != nil {
 		return Point{}, false, e
 	}
@@ -148,15 +222,22 @@ func (w Window) SearchPixel(region Rect, want RGB, t ColorTolerance) (Point, boo
 	return p, ok, nil
 }
 func (w Window) SearchImage(region Rect, tpl image.Image, o ImageSearchOptions) (Point, bool, error) {
+	return w.SearchImageWithCapture(region, tpl, o, CaptureOptions{})
+}
+func (w Window) SearchImageWithCapture(region Rect, tpl image.Image, o ImageSearchOptions, capture CaptureOptions) (Point, bool, error) {
 	t, e := CompileTemplate(tpl, o)
 	if e != nil {
 		return Point{}, false, e
 	}
-	return w.SearchTemplate(region, t)
+	return w.SearchTemplateWithCapture(region, t, capture)
 }
 func (w Window) SearchTemplate(region Rect, t *Template) (Point, bool, error) {
+	return w.SearchTemplateWithCapture(region, t, CaptureOptions{})
+}
+func (w Window) SearchTemplateWithCapture(region Rect, t *Template, capture CaptureOptions) (Point, bool, error) {
 	origin := searchOrigin(region)
-	b, e := w.CaptureRegion(region, CaptureOptions{ClientOnly: true})
+	capture.ClientOnly = true
+	b, e := w.CaptureRegion(region, capture)
 	if e != nil {
 		return Point{}, false, e
 	}
@@ -168,13 +249,19 @@ func (w Window) SearchTemplate(region Rect, t *Template) (Point, bool, error) {
 	return p, ok, e
 }
 func (w Window) SearchImageFile(region Rect, path string, o ImageSearchOptions) (Point, bool, error) {
+	return w.SearchImageFileWithCapture(region, path, o, CaptureOptions{})
+}
+func (w Window) SearchImageFileWithCapture(region Rect, path string, o ImageSearchOptions, capture CaptureOptions) (Point, bool, error) {
 	t, e := LoadTemplate(path, o)
 	if e != nil {
 		return Point{}, false, e
 	}
-	return w.SearchTemplate(region, t)
+	return w.SearchTemplateWithCapture(region, t, capture)
 }
 func (w Window) SearchImageFileSpec(region Rect, spec string) (Point, bool, error) {
+	return w.SearchImageFileSpecWithCapture(region, spec, CaptureOptions{})
+}
+func (w Window) SearchImageFileSpecWithCapture(region Rect, spec string, capture CaptureOptions) (Point, bool, error) {
 	o, path, e := ParseImageSearchOptions(spec)
 	if e != nil {
 		return Point{}, false, e
@@ -182,7 +269,7 @@ func (w Window) SearchImageFileSpec(region Rect, spec string) (Point, bool, erro
 	if path == "" {
 		return Point{}, false, ErrInvalidArgument
 	}
-	return w.SearchImageFile(region, path, o)
+	return w.SearchImageFileWithCapture(region, path, o, capture)
 }
 
 func searchOrigin(r Rect) Point {
@@ -215,6 +302,99 @@ func (w Window) ScalePoint(p Point, reference image.Point) (Point, error) {
 		return Point{}, e
 	}
 	return RelativePoint(p, reference, size), nil
+}
+
+// FrameStabilityOptions controls how long a captured region must stop changing
+// before it is considered ready for input. ConsecutiveFrames includes the
+// initial frame. MaxChangedFraction permits small animated details while the
+// rest of the region is stable.
+type FrameStabilityOptions struct {
+	Interval           time.Duration
+	ConsecutiveFrames  int
+	PixelTolerance     uint8
+	MaxChangedFraction float64
+}
+
+// BitmapsSimilar reports whether two same-sized bitmaps differ in no more than
+// the allowed fraction of pixels. Alpha is ignored because Windows capture
+// backends commonly normalize it.
+func BitmapsSimilar(a, b *Bitmap, pixelTolerance uint8, maxChangedFraction float64) bool {
+	if a == nil || b == nil || !a.valid() || !b.valid() ||
+		a.Width != b.Width || a.Height != b.Height ||
+		maxChangedFraction < 0 || maxChangedFraction > 1 {
+		return false
+	}
+	pixels := a.Width * a.Height
+	maxChanged := int(float64(pixels) * maxChangedFraction)
+	changed := 0
+	for offset := 0; offset < pixels*4; offset += 4 {
+		if abs(a.Pixels[offset], b.Pixels[offset]) > pixelTolerance ||
+			abs(a.Pixels[offset+1], b.Pixels[offset+1]) > pixelTolerance ||
+			abs(a.Pixels[offset+2], b.Pixels[offset+2]) > pixelTolerance {
+			changed++
+			if changed > maxChanged {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// WaitForStableBitmap polls capture until the requested number of consecutive
+// similar frames has been observed. It is useful for animation-driven UIs that
+// expose no separate readiness element.
+func WaitForStableBitmap(ctx context.Context, capture func() (*Bitmap, error), options FrameStabilityOptions) error {
+	if ctx == nil || capture == nil || options.Interval < 0 || options.ConsecutiveFrames < 0 ||
+		options.MaxChangedFraction < 0 || options.MaxChangedFraction > 1 {
+		return ErrInvalidArgument
+	}
+	if options.Interval == 0 {
+		options.Interval = 100 * time.Millisecond
+	}
+	if options.ConsecutiveFrames == 0 {
+		options.ConsecutiveFrames = 2
+	}
+	previous, err := capture()
+	if err != nil {
+		return err
+	}
+	if previous == nil || !previous.valid() {
+		return ErrInvalidArgument
+	}
+	stableFrames := 1
+	if stableFrames >= options.ConsecutiveFrames {
+		return nil
+	}
+	for {
+		if err := Sleep(ctx, options.Interval); err != nil {
+			return err
+		}
+		current, err := capture()
+		if err != nil {
+			return err
+		}
+		if current == nil || !current.valid() {
+			return ErrInvalidArgument
+		}
+		if BitmapsSimilar(previous, current, options.PixelTolerance, options.MaxChangedFraction) {
+			stableFrames++
+		} else {
+			stableFrames = 1
+		}
+		previous = current
+		if stableFrames >= options.ConsecutiveFrames {
+			return nil
+		}
+	}
+}
+
+// WaitForStableRegion captures a client-relative window region until its
+// frames satisfy options.
+func (w Window) WaitForStableRegion(ctx context.Context, region Rect, options FrameStabilityOptions, captureOptions CaptureOptions) error {
+	captureOptions.ClientOnly = true
+	return WaitForStableBitmap(ctx, func() (*Bitmap, error) {
+		return w.CaptureRegion(region, captureOptions)
+	}, options)
 }
 
 // WaitUntil polls without busy-waiting and stops promptly on cancellation.

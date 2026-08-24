@@ -21,6 +21,7 @@ func run() error {
 	filters.Bind(flag.CommandLine, true)
 	limit := flag.Int("limit", 25, "maximum windows to print; zero prints all")
 	showProcessPath := flag.Bool("process-path", false, "query and print each process path")
+	activate := flag.Bool("activate", false, "activate the single matching window")
 	flag.Parse()
 
 	if *limit < 0 {
@@ -40,6 +41,14 @@ func run() error {
 	if len(windows) == 0 {
 		fmt.Println("no matching windows")
 		return nil
+	}
+	if *activate {
+		if len(windows) != 1 {
+			return fmt.Errorf("-activate requires exactly one matching window, found %d", len(windows))
+		}
+		if err := windows[0].Activate(); err != nil {
+			return err
+		}
 	}
 
 	printed := len(windows)

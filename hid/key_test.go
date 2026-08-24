@@ -23,6 +23,25 @@ func TestRuneKey(t *testing.T) {
 	}
 }
 
+func TestParseKey(t *testing.T) {
+	tests := map[string]Key{
+		"a": Key('a'), "Z": Key('z'), "F1": KeyF1, "f24": KeyF24,
+		"Escape": KeyEscape, "Page Down": KeyPageDown, "right_ctrl": KeyRightCtrl,
+		"Numpad0": KeyKeypad0, "keypad-9": KeyKeypad9, "Keypad Plus": KeyKeypadPlus,
+	}
+	for name, want := range tests {
+		got, err := ParseKey(name)
+		if err != nil || got != want {
+			t.Errorf("ParseKey(%q) = (%v, %v), want (%v, nil)", name, got, err, want)
+		}
+	}
+	for _, name := range []string{"", "F0", "F25", "Numpad10", "NotAKey"} {
+		if _, err := ParseKey(name); err == nil {
+			t.Errorf("ParseKey(%q) unexpectedly succeeded", name)
+		}
+	}
+}
+
 func TestSupportedKeyValues(t *testing.T) {
 	for _, key := range []Key{
 		MustKey('a'), KeyLeftCtrl, KeyTab, KeyPrintScreen, KeyKeypadEnter,

@@ -41,8 +41,8 @@ func TestLeonardoHardwareSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.FirmwareMajor != 1 || info.FirmwareMinor < 1 {
-		t.Fatalf("firmware version = %d.%d, want at least 1.1", info.FirmwareMajor, info.FirmwareMinor)
+	if info.FirmwareMajor != 1 || info.FirmwareMinor < 4 {
+		t.Fatalf("firmware version = %d.%d, want at least 1.4", info.FirmwareMajor, info.FirmwareMinor)
 	}
 	wantCapabilities := CapabilityKeyboard | CapabilityRelativeMouse |
 		CapabilityAbsoluteMouse | CapabilityHorizontalWheel | CapabilityUSBDetach
@@ -100,26 +100,43 @@ func TestLeonardoHardwareSmoke(t *testing.T) {
 	if err := device.MoveTo(ctx, targetX, targetY); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(500 * time.Millisecond)
-	var actualX, actualY int
-	for {
-		actualX, actualY, err = CursorPosition()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if abs(actualX-targetX) <= 5 && abs(actualY-targetY) <= 5 {
-			break
-		}
-		if time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	actualX, actualY, err := CursorPosition()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if abs(actualX-targetX) > 5 || abs(actualY-targetY) > 5 {
+	if abs(actualX-targetX) > 1 || abs(actualY-targetY) > 1 {
 		_ = device.MoveTo(ctx, originalX, originalY)
-		t.Fatalf("MoveTo(%d, %d) landed at (%d, %d)", targetX, targetY, actualX, actualY)
+		t.Fatalf("MoveTo(%d, %d) returned before the cursor settled; position=(%d, %d)", targetX, targetY, actualX, actualY)
 	}
 	if err := device.MoveTo(ctx, originalX, originalY); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.MoveToRelative(ctx, targetX, targetY); err != nil {
+		t.Fatal(err)
+	}
+	actualX, actualY, err = CursorPosition()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if abs(actualX-targetX) > 1 || abs(actualY-targetY) > 1 {
+		_ = device.MoveTo(ctx, originalX, originalY)
+		t.Fatalf("MoveToRelative(%d, %d) returned at (%d, %d)", targetX, targetY, actualX, actualY)
+	}
+	if err := device.MoveTo(ctx, originalX, originalY); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.MoveToAbsoluteScreen(ctx, targetX, targetY); err != nil {
+		t.Fatal(err)
+	}
+	actualX, actualY, err = CursorPosition()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if abs(actualX-targetX) > 1 || abs(actualY-targetY) > 1 {
+		_ = device.MoveToAbsoluteScreen(ctx, originalX, originalY)
+		t.Fatalf("MoveToAbsoluteScreen(%d, %d) returned at (%d, %d)", targetX, targetY, actualX, actualY)
+	}
+	if err := device.MoveToAbsoluteScreen(ctx, originalX, originalY); err != nil {
 		t.Fatal(err)
 	}
 	if err := device.ReleaseAll(ctx); err != nil {

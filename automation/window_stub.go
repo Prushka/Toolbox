@@ -2,6 +2,11 @@
 
 package automation
 
+import (
+	"context"
+	"time"
+)
+
 type Window struct{ HWND HWND }
 type WindowQuery struct {
 	Title, TitleContains, Class, Process string
@@ -32,13 +37,16 @@ func (w Window) IsVisible() bool                     { return false }
 func (w Window) IsMinimized() bool                   { return false }
 func (w Window) IsMaximized() bool                   { return false }
 func (w Window) Activate() error                     { return ErrUnsupported }
-func (w Window) Show() error                         { return ErrUnsupported }
-func (w Window) Hide() error                         { return ErrUnsupported }
-func (w Window) Minimize() error                     { return ErrUnsupported }
-func (w Window) Maximize() error                     { return ErrUnsupported }
-func (w Window) Restore() error                      { return ErrUnsupported }
-func (w Window) Close() error                        { return ErrUnsupported }
-func (w Window) SetBounds(Rect) error                { return ErrUnsupported }
-func (w Window) Move(Point) error                    { return ErrUnsupported }
-func (w Window) Resize(int, int) error               { return ErrUnsupported }
-func (w Window) Toggle() error                       { return ErrUnsupported }
+func (w Window) EnsureActive(context.Context, time.Duration) error {
+	return ErrUnsupported
+}
+func (w Window) Show() error           { return ErrUnsupported }
+func (w Window) Hide() error           { return ErrUnsupported }
+func (w Window) Minimize() error       { return ErrUnsupported }
+func (w Window) Maximize() error       { return ErrUnsupported }
+func (w Window) Restore() error        { return ErrUnsupported }
+func (w Window) Close() error          { return ErrUnsupported }
+func (w Window) SetBounds(Rect) error  { return ErrUnsupported }
+func (w Window) Move(Point) error      { return ErrUnsupported }
+func (w Window) Resize(int, int) error { return ErrUnsupported }
+func (w Window) Toggle() error         { return ErrUnsupported }

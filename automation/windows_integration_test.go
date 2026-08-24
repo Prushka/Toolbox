@@ -4,6 +4,7 @@ package automation
 
 import (
 	"errors"
+	"image"
 	"os"
 	"sync"
 	"testing"
@@ -132,6 +133,9 @@ func TestWindowsAndWindowQueries(t *testing.T) {
 	if !w.Valid() {
 		t.Fatal("active window invalid")
 	}
+	if err := w.EnsureActive(t.Context(), 0); err != nil {
+		t.Fatalf("ensure active window: %v", err)
+	}
 	client, e := w.ClientRect()
 	if e == nil && client.Width() >= 8 && client.Height() >= 8 {
 		shot, e := w.CaptureRegion(Rect{0, 0, 8, 8}, CaptureOptions{})
@@ -182,6 +186,18 @@ func TestTimerResolutionLifecycle(t *testing.T) {
 func TestWindowsRejectsInvalidArguments(t *testing.T) {
 	if _, err := CaptureWindow(HWND(1), CaptureOptions{Method: CaptureMethod(255)}); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("invalid capture method=%v", err)
+	}
+	window := Window{HWND: HWND(1)}
+	invalidCapture := CaptureOptions{Method: CaptureMethod(255)}
+	if _, _, err := window.SearchPixelWithCapture(Rect{0, 0, 1, 1}, RGB{}, ColorTolerance{}, invalidCapture); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("pixel search invalid capture method=%v", err)
+	}
+	template, err := CompileTemplate(image.NewRGBA(image.Rect(0, 0, 1, 1)), ImageSearchOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := window.SearchTemplateWithCapture(Rect{0, 0, 1, 1}, template, invalidCapture); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("template search invalid capture method=%v", err)
 	}
 	if unsafe.Sizeof(int(0)) > 4 {
 		if _, err := CaptureScreen(Rect{maxInt - 1, 0, maxInt, 1}); !errors.Is(err, ErrInvalidArgument) {

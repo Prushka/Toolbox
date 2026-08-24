@@ -31,9 +31,10 @@ var (
 )
 
 const (
-	srcCopy      = 0x00CC0020
-	dibRGBColors = 0
-	pwClientOnly = 0x00000001
+	srcCopy             = 0x00CC0020
+	dibRGBColors        = 0
+	pwClientOnly        = 0x00000001
+	pwRenderFullContent = 0x00000002
 )
 
 type winRect struct{ Left, Top, Right, Bottom int32 }
@@ -261,9 +262,9 @@ func capturePrintWindowRegion(hwnd HWND, w, h int, client bool, region Rect) (*B
 	if err := procPrintWindow.Find(); err != nil {
 		return nil, err
 	}
-	flags := uintptr(0)
+	flags := uintptr(pwRenderFullContent)
 	if client {
-		flags = pwClientOnly
+		flags |= pwClientOnly
 	}
 	if ret, _, callErr := procPrintWindow.Call(uintptr(hwnd), dst, flags); ret == 0 {
 		return nil, winCallError(callErr, "PrintWindow failed")

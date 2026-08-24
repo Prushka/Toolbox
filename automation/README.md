@@ -85,7 +85,9 @@ func observe(ctx context.Context) error {
 
 `Window.SearchPixel`, `Window.SearchTemplate`, and `Window.CaptureRegion`
 capture only the requested client-area region. Prefer those calls over a full
-screen capture followed by a crop.
+screen capture followed by a crop. The corresponding `WithCapture` search
+variants accept an explicit `CaptureOptions` when a target needs a non-default
+capture method.
 
 Runnable examples live in [`cmd/automation`](../cmd/automation/README.md).
 They are organized as one focused command per directory and cover capture,
@@ -127,6 +129,11 @@ bad geometry return an error.
 point to a current client size using integer arithmetic. This is useful for
 resolution-relative coordinates in fixed-layout applications, but does not
 replace testing an actual responsive layout.
+
+`AspectFitPoint` maps a reference point through one uniform scale and adds the
+centered letterbox or pillarbox offset. `AspectFitRect` exposes the resulting
+content rectangle. Use these helpers when an application preserves a fixed
+logical aspect ratio instead of stretching its content to fill the client.
 
 Use `Window.ClientToScreen`, `Window.ScreenToClient`, and `Window.ClientOrigin`
 only when a boundary needs to be crossed. Window pixel/capture/search helpers
@@ -191,6 +198,10 @@ point, found, err := target.SearchPixel(
 )
 ```
 
+Use `SearchPixelWithCapture` to select a capture method without changing the
+client-relative search contract. Search capture always targets the client
+area, so it forces `CaptureOptions.ClientOnly` to true.
+
 The returned point is client-relative to `target`, not relative to the supplied
 region. A missing match is `(Point{}, false, nil)`.
 
@@ -231,6 +242,11 @@ if err != nil {
 
 point, found, err := automation.SearchTemplate(bitmap, automation.Rect{}, tpl)
 ```
+
+Window searches can select their capture policy with
+`Window.SearchTemplateWithCapture`. `SearchImageWithCapture`,
+`SearchImageFileWithCapture`, and `SearchImageFileSpecWithCapture` provide the
+same option for one-off searches.
 
 Template compilation performs decoding/scaling once, folds transparent colors
 and alpha-zero source pixels into a wildcard mask, chooses a small set of

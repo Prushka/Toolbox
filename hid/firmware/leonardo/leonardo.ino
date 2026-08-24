@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <HID.h>
 #include <Keyboard.h>
+#include <Mouse.h>
 
 namespace {
 
@@ -43,10 +44,9 @@ constexpr uint16_t kCapabilities =
     (1 << 3) |  // horizontal wheel
     (1 << 4);   // USB detach/attach
 
-// Report 3 retains the Windows-compatible five-button descriptor shape, but
-// its button byte is always zero. Report 4 is the only collection that asserts
-// buttons and also provides relative movement and two wheels. This prevents
-// split button state between top-level collections.
+// Absolute positioning and relative raw input are separate application
+// collections. Report 3 never asserts buttons; report 4 exclusively owns
+// buttons, relative movement, and both wheels.
 const uint8_t kToolboxMouseDescriptor[] PROGMEM = {
     0x05, 0x01,        // Usage Page (Generic Desktop)
     0x09, 0x02,        // Usage (Mouse)
@@ -136,7 +136,12 @@ class ToolboxMouse_ {
   }
 
   bool move(int8_t x, int8_t y, int8_t wheel, int8_t pan) {
-    const RelativeMouseReport report = {buttons_, x, y, wheel, pan};
+    Mouse.move(x, y, wheel);
+    if (pan == 0 && (buttons_ & 0x18) == 0) {
+      return true;
+    }
+    const RelativeMouseReport report = {
+        static_cast<uint8_t>(buttons_ & 0x18), 0, 0, 0, pan};
     return HID().SendReport(4, &report, sizeof(report)) >= 0;
   }
 
@@ -144,7 +149,6 @@ class ToolboxMouse_ {
     if (x > 32767 || y > 32767) {
       return false;
     }
-    // Absolute reports never assert buttons; report 4 owns all button state.
     const AbsoluteMouseReport report = {0, x, y};
     return HID().SendReport(3, &report, sizeof(report)) >= 0;
   }
@@ -152,8 +156,15 @@ class ToolboxMouse_ {
   bool press(uint8_t buttons) {
     const uint8_t previous = buttons_;
     buttons_ |= buttons;
-    if (move(0, 0, 0, 0)) {
+    const uint8_t standard = buttons & 0x07;
+    if (standard != 0) {
+      Mouse.press(standard);
+    }
+    if ((buttons & 0x18) == 0 || move(0, 0, 0, 0)) {
       return true;
+    }
+    if (standard != 0) {
+      Mouse.release(standard);
     }
     buttons_ = previous;
     return false;
@@ -162,8 +173,15 @@ class ToolboxMouse_ {
   bool release(uint8_t buttons) {
     const uint8_t previous = buttons_;
     buttons_ &= ~buttons;
-    if (move(0, 0, 0, 0)) {
+    const uint8_t standard = buttons & 0x07;
+    if (standard != 0) {
+      Mouse.release(standard);
+    }
+    if ((buttons & 0x18) == 0 || move(0, 0, 0, 0)) {
       return true;
+    }
+    if (standard != 0) {
+      Mouse.press(standard);
     }
     buttons_ = previous;
     return false;
@@ -172,9 +190,15 @@ class ToolboxMouse_ {
   bool releaseAll() {
     const uint8_t previous = buttons_;
     buttons_ = 0;
-    if (move(0, 0, 0, 0)) {
+    Mouse.release(MOUSE_LEFT);
+    Mouse.release(MOUSE_RIGHT);
+    Mouse.release(MOUSE_MIDDLE);
+    if ((previous & 0x18) == 0 || move(0, 0, 0, 0)) {
       return true;
     }
+    if ((previous & 0x01) != 0) Mouse.press(MOUSE_LEFT);
+    if ((previous & 0x02) != 0) Mouse.press(MOUSE_RIGHT);
+    if ((previous & 0x04) != 0) Mouse.press(MOUSE_MIDDLE);
     buttons_ = previous;
     return false;
   }
@@ -266,7 +290,7 @@ Status runCommand(uint8_t command, const uint8_t* payload,
         return kBadPayload;
       }
       response[0] = 1;  // firmware major
-      response[1] = 1;  // firmware minor
+      response[1] = 5;  // firmware minor
       response[2] = kProtocolVersion;
       response[3] = lowByte(kCapabilities);
       response[4] = highByte(kCapabilities);
@@ -460,6 +484,7 @@ void readCommands() {
 void setup() {
   Serial.begin(115200);
   Keyboard.begin();
+  Mouse.begin();
   releaseAll();
   lastValidCommandAt = millis();
 }

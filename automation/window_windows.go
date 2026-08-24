@@ -3,10 +3,12 @@
 package automation
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -154,6 +156,26 @@ func (w Window) Activate() error {
 		return fmt.Errorf("automation: Windows denied foreground activation")
 	}
 	return nil
+}
+
+// EnsureActive brings the window to the foreground when necessary and waits
+// for applications that bind raw input on foreground transitions. No delay is
+// incurred when the window is already active.
+func (w Window) EnsureActive(ctx context.Context, settle time.Duration) error {
+	if ctx == nil || settle < 0 {
+		return ErrInvalidArgument
+	}
+	if !w.Valid() {
+		return ErrNotFound
+	}
+	active, err := ActiveWindow()
+	if err == nil && active.HWND == w.HWND {
+		return nil
+	}
+	if err := w.Activate(); err != nil {
+		return err
+	}
+	return Sleep(ctx, settle)
 }
 func (w Window) Show() error     { return showWindow(w.HWND, swShow) }
 func (w Window) Hide() error     { return showWindow(w.HWND, swHide) }

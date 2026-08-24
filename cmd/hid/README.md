@@ -27,10 +27,22 @@ Run input examples explicitly:
 ```powershell
 go run .\cmd\hid\keyboard -run
 go run .\cmd\hid\keyboard -run -text "Custom US-ASCII text"
+go run .\cmd\hid\keyboard -run -key F1 -port COM5
+go run .\cmd\hid\keyboard -run -chord "ALT,TAB" -port COM5
 go run .\cmd\hid\mouse -run
 go run .\cmd\hid\mouse -run -x 640 -y 400 -wheel -3 -click
+go run .\cmd\hid\mouse -run -x 640 -y 400 -client-x 320 -client-y 200 -click
 go run .\cmd\hid\actions -run -repeat 3
 go run .\cmd\hid\cycleusb -run -duration 1s
+```
+
+The mouse and keyboard commands can activate one exact-title window
+immediately before opening the board and sending input. This is useful for
+applications such as games that consume foreground-only raw HID input:
+
+```powershell
+go run .\cmd\hid\mouse -run -activate-title BloonsTD6 -x 1984 -y 1662 -click
+go run .\cmd\hid\keyboard -run -activate-title BloonsTD6 -key F1
 ```
 
 All commands accept `-port COM5`; when omitted, exactly one `046D:C223` CDC

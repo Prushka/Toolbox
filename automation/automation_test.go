@@ -62,6 +62,65 @@ func TestBitmapAndPNG(t *testing.T) {
 	}
 }
 
+func TestBitmapsSimilar(t *testing.T) {
+	a, err := NewBitmap(10, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := a.Clone()
+	b.Set(0, 0, RGB{4, 4, 4})
+	if !BitmapsSimilar(a, b, 4, 0) {
+		t.Fatal("per-channel tolerance rejected a matching frame")
+	}
+	b.Set(0, 0, RGB{5, 5, 5})
+	if BitmapsSimilar(a, b, 4, 0) {
+		t.Fatal("exact changed-pixel allowance accepted a changed frame")
+	}
+	if !BitmapsSimilar(a, b, 4, 0.1) {
+		t.Fatal("changed-pixel allowance rejected one of ten pixels")
+	}
+	if BitmapsSimilar(a, b, 4, -0.1) {
+		t.Fatal("negative changed-pixel allowance was accepted")
+	}
+}
+
+func TestWaitForStableBitmapResetsAfterChange(t *testing.T) {
+	frames := make([]*Bitmap, 6)
+	for index := range frames {
+		frames[index], _ = NewBitmap(1, 1)
+	}
+	frames[1].Set(0, 0, RGB{10, 0, 0})
+	frames[2].Set(0, 0, RGB{10, 0, 0})
+	frames[3].Set(0, 0, RGB{20, 0, 0})
+	frames[4].Set(0, 0, RGB{20, 0, 0})
+	frames[5].Set(0, 0, RGB{20, 0, 0})
+	index := 0
+	err := WaitForStableBitmap(context.Background(), func() (*Bitmap, error) {
+		frame := frames[index]
+		index++
+		return frame, nil
+	}, FrameStabilityOptions{Interval: time.Millisecond, ConsecutiveFrames: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 6 {
+		t.Fatalf("capture count = %d, want 6", index)
+	}
+}
+
+func TestWaitForStableBitmapValidationAndCancellation(t *testing.T) {
+	if err := WaitForStableBitmap(nil, func() (*Bitmap, error) { return nil, nil }, FrameStabilityOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("nil context error = %v, want ErrInvalidArgument", err)
+	}
+	frame, _ := NewBitmap(1, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := WaitForStableBitmap(ctx, func() (*Bitmap, error) { return frame, nil }, FrameStabilityOptions{ConsecutiveFrames: 2})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled wait error = %v, want context.Canceled", err)
+	}
+}
+
 func TestPixelSearchSemantics(t *testing.T) {
 	b, _ := NewBitmap(4, 3)
 	b.Set(1, 0, RGB{100, 100, 100})
@@ -399,6 +458,31 @@ func TestConcurrentJitterAndTimerClose(t *testing.T) {
 func TestRelativePoint(t *testing.T) {
 	if got := RelativePoint(Point{100, 50}, image.Point{200, 100}, image.Point{400, 300}); got != (Point{200, 150}) {
 		t.Fatal(got)
+	}
+}
+
+func TestAspectFitCoordinates(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   image.Point
+		wantRect  Rect
+		point     Point
+		wantPoint Point
+	}{
+		{name: "identity", current: image.Point{1920, 1080}, wantRect: Rect{0, 0, 1920, 1080}, point: Point{595, 494}, wantPoint: Point{595, 494}},
+		{name: "scaled", current: image.Point{1280, 720}, wantRect: Rect{0, 0, 1280, 720}, point: Point{960, 540}, wantPoint: Point{640, 360}},
+		{name: "letterboxed", current: image.Point{1920, 1200}, wantRect: Rect{0, 60, 1920, 1140}, point: Point{960, 540}, wantPoint: Point{960, 600}},
+		{name: "pillarboxed", current: image.Point{2048, 1080}, wantRect: Rect{64, 0, 1984, 1080}, point: Point{960, 540}, wantPoint: Point{1024, 540}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := AspectFitRect(image.Point{1920, 1080}, test.current); got != test.wantRect {
+				t.Fatalf("AspectFitRect = %+v, want %+v", got, test.wantRect)
+			}
+			if got := AspectFitPoint(test.point, image.Point{1920, 1080}, test.current); got != test.wantPoint {
+				t.Fatalf("AspectFitPoint = %+v, want %+v", got, test.wantPoint)
+			}
+		})
 	}
 }
 

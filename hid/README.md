@@ -99,18 +99,17 @@ use a UART baud rate, but this conventional value keeps tooling predictable.
 
 ## Firmware
 
-The current firmware reports version `1.1`. The sketch includes Arduino's
+The current firmware reports version `1.3`. The sketch includes Arduino's
 `Keyboard` and low-level `HID` libraries and appends a custom mouse descriptor
-with two top-level collections:
+with one relative Mouse application collection:
 
-- Report ID `3`: five-button absolute pointer, 16-bit X/Y, logical range
-  `0..32767`.
 - Report ID `4`: five-button relative pointer with signed 8-bit X/Y,
   vertical wheel, and horizontal AC Pan, each in `-127..127`.
 
-Only report ID `4` owns button state. Absolute reports always send a zero button
-byte, preventing Windows from tracking one button in two independently managed
-collections and leaving it logically stuck across absolute/relative movement.
+Movement, wheels, and buttons therefore belong to the same emulated pointer in
+both Windows and raw-input applications. Firmware 1.3 does not advertise the
+absolute-pointer capability; `MoveTo` performs host-side closed-loop relative
+movement using read-only Windows cursor feedback.
 
 The relative button mask is kept in RAM and rolled back when a HID report fails.
 Keyboard HID failures call `Keyboard.releaseAll()`. Startup emits an all-released
@@ -164,7 +163,7 @@ after a timeout.
 | `0x12` | Release keyboard | empty |
 | `0x13` | Type ASCII | 1..64 printable bytes |
 | `0x20` | Relative move/scroll | `dx, dy, wheel, pan` signed bytes |
-| `0x21` | Absolute move | little-endian `uint16 x`, `uint16 y` |
+| `0x21` | Legacy absolute move (unsupported by firmware 1.3) | little-endian `uint16 x`, `uint16 y` |
 | `0x22` | Mouse button down | five-bit mask |
 | `0x23` | Mouse button up | five-bit mask |
 | `0x24` | Release mouse | empty |
@@ -184,7 +183,7 @@ Response statuses are:
 
 Info reports firmware major/minor, protocol version, capability bits, maximum
 payload, and watchdog seconds. Current capabilities are keyboard, relative
-mouse, absolute mouse, horizontal wheel, and USB detach/attach.
+mouse, horizontal wheel, and USB detach/attach.
 
 ## Go client and concurrency
 
@@ -232,7 +231,9 @@ watchdog/startup release clears locally held state.
 Direct methods cover:
 
 - Keyboard: `KeyDown`, `KeyUp`, `Press`, `Type`, `ReleaseKeyboard`.
-- Pointer: `Move`, `MoveAbsolute`, Windows `MoveTo`, `CursorPosition`.
+- Pointer: `Move`, `MoveAbsolute`, Windows `MoveTo`, `MoveToRelative`,
+	`ClickAt`, `MoveToWindow`, `ClickAtWindow`, `ClickPreparedWindow`,
+	`CursorPosition`.
 - Buttons: `ButtonDown`, `ButtonUp`, `Click`, `DoubleClick`, `ReleaseMouse`.
 - Wheel: `Scroll` with independent vertical and horizontal values.
 - Lifecycle: `Info`, `Ping`, `ReleaseAll`, `CycleUSB`, `Close`.
@@ -242,9 +243,21 @@ Mouse button constants map directly to the five-bit report: left `0x01`, right
 passed together and are combined into one report mask.
 
 Large relative movements and scrolls split into signed 8-bit reports.
-`MoveAbsolute` accepts normalized HID coordinates. Windows `MoveTo` converts
-primary-display pixels using `GetSystemMetrics`; relative motion remains subject
-to Windows pointer speed and acceleration.
+`MoveAbsolute` remains available for compatible older firmware that advertises
+absolute HID support. Windows `MoveTo` and `MoveToRelative` reach a primary-
+display pixel with relative HID reports and cursor feedback, then allow raw-
+input consumers to drain the final movement reports before returning.
+`MoveToWindow` aligns a foreground raw-input pointer and the Windows cursor;
+this lets a caller align before pressing a key that enters a placement mode.
+`ClickAtWindow` aligns and clicks in one call. It verifies that another physical
+mouse did not move between alignment and button-down, recalibrating and retrying
+when needed. Targeted `ClickAt` adds a rendered-frame settlement period before
+its Arduino click.
+`ClickPreparedWindow` performs no movement: it clicks only when the live cursor
+still matches the exact target prepared by `MoveToWindow`, returning
+`ErrWindowPointerMoved` after another mouse changes that position.
+movement uses small HID deltas that stay in Windows' 1:1 range, preventing
+pointer acceleration from separating the OS cursor from raw-input applications.
 
 `Type` validates the complete input before sending it, accepts printable
 US-ASCII, and maps newline, carriage return, tab, and backspace to explicit

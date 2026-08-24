@@ -3,11 +3,34 @@ package example
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/Prushka/Toolbox/automation"
 	"github.com/Prushka/Toolbox/hid"
 )
+
+// ActivateWindowByTitle brings one visible, exact-title match to the
+// foreground. Keeping activation in the input process avoids another process
+// taking focus between activation and the first Arduino HID report.
+func ActivateWindowByTitle(title string) error {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return nil
+	}
+	if err := automation.SetDPIAware(); err != nil && !errors.Is(err, automation.ErrUnsupported) {
+		return err
+	}
+	windows, err := automation.FindWindows(automation.WindowQuery{Title: title, VisibleOnly: true})
+	if err != nil {
+		return err
+	}
+	if len(windows) != 1 {
+		return fmt.Errorf("expected one visible window titled %q, found %d", title, len(windows))
+	}
+	return windows[0].Activate()
+}
 
 // ResolvePort uses an explicit COM port or requires exactly one matching board.
 func ResolvePort(requested string) (hid.Port, error) {

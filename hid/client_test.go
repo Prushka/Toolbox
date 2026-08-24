@@ -370,6 +370,16 @@ func TestRelativeMoveAndScrollChunking(t *testing.T) {
 	assertCommand(t, harness.next(t), opMouseMove, []byte{0, 0, 0, 1})
 }
 
+func TestLinearMoveUsesFourCountReports(t *testing.T) {
+	harness := newClientHarness(t, nil)
+	if err := harness.client.MoveLinear(context.Background(), 10, -9); err != nil {
+		t.Fatal(err)
+	}
+	assertCommand(t, harness.next(t), opMouseMove, []byte{4, 252, 0, 0})
+	assertCommand(t, harness.next(t), opMouseMove, []byte{4, 252, 0, 0})
+	assertCommand(t, harness.next(t), opMouseMove, []byte{2, 255, 0, 0})
+}
+
 func TestAbsoluteMovement(t *testing.T) {
 	harness := newClientHarness(t, nil)
 	if err := harness.client.MoveAbsolute(context.Background(), 1234, 32767); err != nil {

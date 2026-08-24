@@ -1,6 +1,11 @@
 package hid
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
 
 // Key is an Arduino Keyboard-library key value. Printable keys use their
 // lowercase US-ASCII byte; modifiers and navigation keys use the constants
@@ -98,6 +103,63 @@ func RuneKey(r rune) (Key, error) {
 		return 0, fmt.Errorf("hid: %q is not a printable US-ASCII key", r)
 	}
 	return Key(r), nil
+}
+
+// ParseKey parses a printable US-ASCII key or a common named Arduino HID key.
+// Names are case-insensitive and may contain spaces, hyphens, or underscores.
+func ParseKey(name string) (Key, error) {
+	value := strings.TrimSpace(name)
+	if utf8.RuneCountInString(value) == 1 {
+		r, _ := utf8.DecodeRuneInString(value)
+		return RuneKey(r)
+	}
+	normalized := strings.NewReplacer(" ", "", "-", "", "_", "").Replace(strings.ToLower(value))
+	if strings.HasPrefix(normalized, "f") {
+		n, err := strconv.Atoi(strings.TrimPrefix(normalized, "f"))
+		if err == nil && n >= 1 && n <= 24 {
+			if n <= 12 {
+				return Key(int(KeyF1) + n - 1), nil
+			}
+			return Key(int(KeyF13) + n - 13), nil
+		}
+	}
+	for _, prefix := range []string{"keypad", "numpad"} {
+		if strings.HasPrefix(normalized, prefix) {
+			n, err := strconv.Atoi(strings.TrimPrefix(normalized, prefix))
+			if err == nil && n >= 0 && n <= 9 {
+				if n == 0 {
+					return KeyKeypad0, nil
+				}
+				return Key(int(KeyKeypad1) + n - 1), nil
+			}
+		}
+	}
+	if key, ok := namedKeys[normalized]; ok {
+		return key, nil
+	}
+	return 0, fmt.Errorf("hid: unknown key %q", name)
+}
+
+var namedKeys = map[string]Key{
+	"ctrl": Ctrl, "control": Ctrl, "leftctrl": KeyLeftCtrl, "leftcontrol": KeyLeftCtrl,
+	"rightctrl": KeyRightCtrl, "rightcontrol": KeyRightCtrl,
+	"shift": Shift, "leftshift": KeyLeftShift, "rightshift": KeyRightShift,
+	"alt": Alt, "leftalt": KeyLeftAlt, "rightalt": KeyRightAlt,
+	"gui": GUI, "win": GUI, "windows": GUI, "leftgui": KeyLeftGUI, "leftwin": KeyLeftGUI,
+	"rightgui": KeyRightGUI, "rightwin": KeyRightGUI,
+	"enter": KeyEnter, "return": KeyEnter, "escape": KeyEscape, "esc": KeyEscape,
+	"backspace": KeyBackspace, "tab": KeyTab, "space": MustKey(' '), "capslock": KeyCapsLock,
+	"printscreen": KeyPrintScreen, "scrolllock": KeyScrollLock, "pause": KeyPause,
+	"insert": KeyInsert, "home": KeyHome, "pageup": KeyPageUp, "delete": KeyDelete,
+	"end": KeyEnd, "pagedown": KeyPageDown, "right": KeyRight, "left": KeyLeft,
+	"down": KeyDown, "up": KeyUp, "numlock": KeyNumLock,
+	"keypadslash": KeyKeypadSlash, "numpadslash": KeyKeypadSlash,
+	"keypadasterisk": KeyKeypadAsterisk, "numpadasterisk": KeyKeypadAsterisk,
+	"keypadminus": KeyKeypadMinus, "numpadminus": KeyKeypadMinus,
+	"keypadplus": KeyKeypadPlus, "numpadplus": KeyKeypadPlus,
+	"keypadenter": KeyKeypadEnter, "numpadenter": KeyKeypadEnter,
+	"keypaddecimal": KeyKeypadDecimal, "numpaddecimal": KeyKeypadDecimal,
+	"menu": KeyMenu,
 }
 
 // MustKey is a convenience for package-level configuration and examples.
