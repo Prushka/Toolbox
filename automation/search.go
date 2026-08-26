@@ -344,16 +344,10 @@ func BitmapsSimilar(a, b *Bitmap, pixelTolerance uint8, maxChangedFraction float
 // similar frames has been observed. It is useful for animation-driven UIs that
 // expose no separate readiness element.
 func WaitForStableBitmap(ctx context.Context, capture func() (*Bitmap, error), options FrameStabilityOptions) error {
-	if ctx == nil || capture == nil || options.Interval < 0 || options.ConsecutiveFrames < 0 ||
-		options.MaxChangedFraction < 0 || options.MaxChangedFraction > 1 {
+	if !validFrameWait(ctx, capture, options) {
 		return ErrInvalidArgument
 	}
-	if options.Interval == 0 {
-		options.Interval = 100 * time.Millisecond
-	}
-	if options.ConsecutiveFrames == 0 {
-		options.ConsecutiveFrames = 2
-	}
+	options = defaultFrameStabilityOptions(options)
 	previous, err := capture()
 	if err != nil {
 		return err
@@ -388,6 +382,88 @@ func WaitForStableBitmap(ctx context.Context, capture func() (*Bitmap, error), o
 	}
 }
 
+// WaitForBitmapTransition captures an initial frame, invokes action, waits for
+// the capture to differ from that frame, then waits for the changed state to
+// stabilize. This prevents a caller from mistaking a stale, already-stable UI
+// for completion of the action it just dispatched.
+func WaitForBitmapTransition(
+	ctx context.Context,
+	capture func() (*Bitmap, error),
+	action func() error,
+	options FrameStabilityOptions,
+) error {
+	if !validFrameWait(ctx, capture, options) || action == nil {
+		return ErrInvalidArgument
+	}
+	options = defaultFrameStabilityOptions(options)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	initial, err := capture()
+	if err != nil {
+		return err
+	}
+	if initial == nil || !initial.valid() {
+		return ErrInvalidArgument
+	}
+	if err := action(); err != nil {
+		return err
+	}
+
+	changed := false
+	stableFrames := 0
+	var previous *Bitmap
+	for {
+		if err := Sleep(ctx, options.Interval); err != nil {
+			return err
+		}
+		current, err := capture()
+		if err != nil {
+			return err
+		}
+		if current == nil || !current.valid() ||
+			current.Width != initial.Width || current.Height != initial.Height {
+			return ErrInvalidArgument
+		}
+		if !changed {
+			if BitmapsSimilar(initial, current, options.PixelTolerance, options.MaxChangedFraction) {
+				continue
+			}
+			changed = true
+			stableFrames = 1
+			previous = current
+			if stableFrames >= options.ConsecutiveFrames {
+				return nil
+			}
+			continue
+		}
+		if BitmapsSimilar(previous, current, options.PixelTolerance, options.MaxChangedFraction) {
+			stableFrames++
+		} else {
+			stableFrames = 1
+		}
+		previous = current
+		if stableFrames >= options.ConsecutiveFrames {
+			return nil
+		}
+	}
+}
+
+func validFrameWait(ctx context.Context, capture func() (*Bitmap, error), options FrameStabilityOptions) bool {
+	return ctx != nil && capture != nil && options.Interval >= 0 && options.ConsecutiveFrames >= 0 &&
+		options.MaxChangedFraction >= 0 && options.MaxChangedFraction <= 1
+}
+
+func defaultFrameStabilityOptions(options FrameStabilityOptions) FrameStabilityOptions {
+	if options.Interval == 0 {
+		options.Interval = 100 * time.Millisecond
+	}
+	if options.ConsecutiveFrames == 0 {
+		options.ConsecutiveFrames = 2
+	}
+	return options
+}
+
 // WaitForStableRegion captures a client-relative window region until its
 // frames satisfy options.
 func (w Window) WaitForStableRegion(ctx context.Context, region Rect, options FrameStabilityOptions, captureOptions CaptureOptions) error {
@@ -395,6 +471,21 @@ func (w Window) WaitForStableRegion(ctx context.Context, region Rect, options Fr
 	return WaitForStableBitmap(ctx, func() (*Bitmap, error) {
 		return w.CaptureRegion(region, captureOptions)
 	}, options)
+}
+
+// WaitForRegionTransition is the client-relative window form of
+// WaitForBitmapTransition.
+func (w Window) WaitForRegionTransition(
+	ctx context.Context,
+	region Rect,
+	action func() error,
+	options FrameStabilityOptions,
+	captureOptions CaptureOptions,
+) error {
+	captureOptions.ClientOnly = true
+	return WaitForBitmapTransition(ctx, func() (*Bitmap, error) {
+		return w.CaptureRegion(region, captureOptions)
+	}, action, options)
 }
 
 // WaitUntil polls without busy-waiting and stops promptly on cancellation.

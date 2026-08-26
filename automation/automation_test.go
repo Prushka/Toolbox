@@ -121,6 +121,69 @@ func TestWaitForStableBitmapValidationAndCancellation(t *testing.T) {
 	}
 }
 
+func TestWaitForBitmapTransitionWaitsForChangeThenStability(t *testing.T) {
+	frames := make([]*Bitmap, 5)
+	for index := range frames {
+		frames[index], _ = NewBitmap(1, 1)
+	}
+	frames[2].Set(0, 0, RGB{10, 0, 0})
+	frames[3].Set(0, 0, RGB{20, 0, 0})
+	frames[4].Set(0, 0, RGB{20, 0, 0})
+	index := 0
+	actionCalls := 0
+	err := WaitForBitmapTransition(context.Background(), func() (*Bitmap, error) {
+		frame := frames[index]
+		index++
+		return frame, nil
+	}, func() error {
+		actionCalls++
+		if index != 1 {
+			t.Fatalf("action ran after %d captures, want initial capture only", index)
+		}
+		return nil
+	}, FrameStabilityOptions{Interval: time.Millisecond, ConsecutiveFrames: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != 5 || actionCalls != 1 {
+		t.Fatalf("captures=%d actions=%d, want 5 and 1", index, actionCalls)
+	}
+}
+
+func TestWaitForBitmapTransitionRejectsStaleStableState(t *testing.T) {
+	frame, _ := NewBitmap(1, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	captures := 0
+	err := WaitForBitmapTransition(ctx, func() (*Bitmap, error) {
+		captures++
+		if captures == 3 {
+			cancel()
+		}
+		return frame, nil
+	}, func() error { return nil }, FrameStabilityOptions{Interval: time.Millisecond})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("unchanged wait error = %v, want context.Canceled", err)
+	}
+	if captures != 3 {
+		t.Fatalf("captures = %d, want 3", captures)
+	}
+}
+
+func TestWaitForBitmapTransitionValidationAndActionError(t *testing.T) {
+	frame, _ := NewBitmap(1, 1)
+	capture := func() (*Bitmap, error) { return frame, nil }
+	if err := WaitForBitmapTransition(nil, capture, func() error { return nil }, FrameStabilityOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("nil context error = %v, want ErrInvalidArgument", err)
+	}
+	if err := WaitForBitmapTransition(context.Background(), capture, nil, FrameStabilityOptions{}); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("nil action error = %v, want ErrInvalidArgument", err)
+	}
+	want := errors.New("action failed")
+	if err := WaitForBitmapTransition(context.Background(), capture, func() error { return want }, FrameStabilityOptions{}); !errors.Is(err, want) {
+		t.Fatalf("action error = %v, want %v", err, want)
+	}
+}
+
 func TestPixelSearchSemantics(t *testing.T) {
 	b, _ := NewBitmap(4, 3)
 	b.Set(1, 0, RGB{100, 100, 100})

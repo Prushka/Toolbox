@@ -89,6 +89,12 @@ screen capture followed by a crop. The corresponding `WithCapture` search
 variants accept an explicit `CaptureOptions` when a target needs a non-default
 capture method.
 
+For animation-driven controls, `WaitForStableRegion` waits for consecutive
+similar captures. `WaitForRegionTransition` first captures the old state,
+invokes an action, requires a visible change, then waits for the new state to
+stabilize. Use the transition form after input so a stale stable frame cannot
+be mistaken for completion.
+
 Runnable examples live in [`cmd/automation`](../cmd/automation/README.md).
 They are organized as one focused command per directory and cover capture,
 pixel/image search, event-driven input monitoring, direct input polling, window
@@ -324,7 +330,25 @@ the standard Windows idle, below-normal, normal, above-normal, and high
 priority classes. They do not offer realtime priority. Permission errors are
 returned to the caller.
 
-## Timing and polling
+## Power, timing, and polling
+
+`BeginPowerRequest` creates a process-owned Windows power request using the
+documented power-management APIs. Select `SystemRequired` to prevent idle
+sleep and `DisplayRequired` to prevent the display idle timer from turning off.
+Windows exposes the supplied reason in `powercfg /requests`. Always close the
+returned lease; Windows also releases it if the process exits.
+
+```go
+request, err := automation.BeginPowerRequest(automation.PowerRequestOptions{
+	Reason:          "Running an unattended automation sequence",
+	SystemRequired:  true,
+	DisplayRequired: true,
+})
+if err != nil {
+	return err
+}
+defer request.Close()
+```
 
 | API | Design and use |
 | --- | --- |
