@@ -24,6 +24,8 @@ enum Command : uint8_t {
   kMouseDown = 0x22,
   kMouseUp = 0x23,
   kMouseReset = 0x24,
+  kMouseMoveLinearBatch = 0x25,
+  kMouseMoveRelativeBatch = 0x26,
   kReleaseAll = 0x30,
   kCycleUSB = 0x31,
 };
@@ -42,11 +44,13 @@ constexpr uint16_t kCapabilities =
     (1 << 1) |  // relative mouse
     (1 << 2) |  // absolute mouse
     (1 << 3) |  // horizontal wheel
-    (1 << 4);   // USB detach/attach
+    (1 << 4) |  // USB detach/attach
+    (1 << 5) |  // batched linear mouse
+    (1 << 6);   // batched relative mouse
 
 // Absolute positioning and relative raw input are separate application
-// collections. Report 3 never asserts buttons; report 4 exclusively owns
-// buttons, relative movement, and both wheels.
+// collections. Report 3 never asserts buttons. Standard report 1 carries X/Y,
+// the vertical wheel, and buttons 1-3; report 4 carries pan and buttons 4-5.
 const uint8_t kToolboxMouseDescriptor[] PROGMEM = {
     0x05, 0x01,        // Usage Page (Generic Desktop)
     0x09, 0x02,        // Usage (Mouse)
@@ -119,6 +123,13 @@ struct __attribute__((packed)) AbsoluteMouseReport {
   uint16_t y;
 };
 
+struct __attribute__((packed)) StandardMouseReport {
+  uint8_t buttons;
+  int8_t x;
+  int8_t y;
+  int8_t wheel;
+};
+
 struct __attribute__((packed)) RelativeMouseReport {
   uint8_t buttons;
   int8_t x;
@@ -136,13 +147,13 @@ class ToolboxMouse_ {
   }
 
   bool move(int8_t x, int8_t y, int8_t wheel, int8_t pan) {
-    Mouse.move(x, y, wheel);
+    if (!sendStandard(buttons_, x, y, wheel)) {
+      return false;
+    }
     if (pan == 0 && (buttons_ & 0x18) == 0) {
       return true;
     }
-    const RelativeMouseReport report = {
-        static_cast<uint8_t>(buttons_ & 0x18), 0, 0, 0, pan};
-    return HID().SendReport(4, &report, sizeof(report)) >= 0;
+    return sendExtended(buttons_, 0, 0, 0, pan);
   }
 
   bool moveAbsolute(uint16_t x, uint16_t y) {
@@ -154,56 +165,50 @@ class ToolboxMouse_ {
   }
 
   bool press(uint8_t buttons) {
-    const uint8_t previous = buttons_;
-    buttons_ |= buttons;
-    const uint8_t standard = buttons & 0x07;
-    if (standard != 0) {
-      Mouse.press(standard);
-    }
-    if ((buttons & 0x18) == 0 || move(0, 0, 0, 0)) {
-      return true;
-    }
-    if (standard != 0) {
-      Mouse.release(standard);
-    }
-    buttons_ = previous;
-    return false;
+    return setButtons(buttons_ | buttons, false);
   }
 
   bool release(uint8_t buttons) {
-    const uint8_t previous = buttons_;
-    buttons_ &= ~buttons;
-    const uint8_t standard = buttons & 0x07;
-    if (standard != 0) {
-      Mouse.release(standard);
-    }
-    if ((buttons & 0x18) == 0 || move(0, 0, 0, 0)) {
-      return true;
-    }
-    if (standard != 0) {
-      Mouse.press(standard);
-    }
-    buttons_ = previous;
-    return false;
+    return setButtons(buttons_ & ~buttons, false);
   }
 
   bool releaseAll() {
-    const uint8_t previous = buttons_;
-    buttons_ = 0;
-    Mouse.release(MOUSE_LEFT);
-    Mouse.release(MOUSE_RIGHT);
-    Mouse.release(MOUSE_MIDDLE);
-    if ((previous & 0x18) == 0 || move(0, 0, 0, 0)) {
-      return true;
-    }
-    if ((previous & 0x01) != 0) Mouse.press(MOUSE_LEFT);
-    if ((previous & 0x02) != 0) Mouse.press(MOUSE_RIGHT);
-    if ((previous & 0x04) != 0) Mouse.press(MOUSE_MIDDLE);
-    buttons_ = previous;
-    return false;
+    return setButtons(0, true);
   }
 
  private:
+  bool sendStandard(uint8_t buttons, int8_t x, int8_t y, int8_t wheel) {
+    const StandardMouseReport report = {
+        static_cast<uint8_t>(buttons & 0x07), x, y, wheel};
+    return HID().SendReport(1, &report, sizeof(report)) >= 0;
+  }
+
+  bool sendExtended(uint8_t buttons, int8_t x, int8_t y, int8_t wheel,
+                    int8_t pan) {
+    const RelativeMouseReport report = {
+        static_cast<uint8_t>(buttons & 0x18), x, y, wheel, pan};
+    return HID().SendReport(4, &report, sizeof(report)) >= 0;
+  }
+
+  bool setButtons(uint8_t next, bool force) {
+    const uint8_t previous = buttons_;
+    const bool standardChanged = force || (previous & 0x07) != (next & 0x07);
+    const bool extendedChanged = force || (previous & 0x18) != (next & 0x18);
+    if (standardChanged && !sendStandard(next, 0, 0, 0)) {
+      sendStandard(previous, 0, 0, 0);
+      return false;
+    }
+    if (extendedChanged && !sendExtended(next, 0, 0, 0, 0)) {
+      if (standardChanged) {
+        sendStandard(previous, 0, 0, 0);
+      }
+      sendExtended(previous, 0, 0, 0, 0);
+      return false;
+    }
+    buttons_ = next;
+    return true;
+  }
+
   uint8_t buttons_;
 };
 
@@ -262,6 +267,34 @@ bool validateKeyPayload(const uint8_t* payload, uint8_t payloadLength) {
   return true;
 }
 
+bool validateLinearMouseBatchPayload(const uint8_t* payload,
+                                     uint8_t payloadLength) {
+  if (payloadLength == 0 || (payloadLength & 1) != 0) {
+    return false;
+  }
+  for (uint8_t index = 0; index < payloadLength; index += 2) {
+    const int8_t x = static_cast<int8_t>(payload[index]);
+    const int8_t y = static_cast<int8_t>(payload[index + 1]);
+    if (x < -4 || x > 4 || y < -4 || y > 4) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool validateRelativeMouseBatchPayload(const uint8_t* payload,
+                                       uint8_t payloadLength) {
+  if (payloadLength == 0 || (payloadLength & 1) != 0) {
+    return false;
+  }
+  for (uint8_t index = 0; index < payloadLength; index += 2) {
+    if (payload[index] == 0x80 || payload[index + 1] == 0x80) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void sendResponse(uint8_t sequence, Status status, const uint8_t* payload,
                   uint8_t payloadLength) {
   uint8_t response[6 + kMaximumPayload];
@@ -290,7 +323,7 @@ Status runCommand(uint8_t command, const uint8_t* payload,
         return kBadPayload;
       }
       response[0] = 1;  // firmware major
-      response[1] = 5;  // firmware minor
+      response[1] = 8;  // firmware minor
       response[2] = kProtocolVersion;
       response[3] = lowByte(kCapabilities);
       response[4] = highByte(kCapabilities);
@@ -383,6 +416,32 @@ Status runCommand(uint8_t command, const uint8_t* payload,
         return kBadPayload;
       }
       return ToolboxMouse.releaseAll() ? kOK : kHIDFailure;
+
+    case kMouseMoveLinearBatch:
+      if (!validateLinearMouseBatchPayload(payload, payloadLength)) {
+        return kBadPayload;
+      }
+      for (uint8_t index = 0; index < payloadLength; index += 2) {
+        if (!ToolboxMouse.move(static_cast<int8_t>(payload[index]),
+                               static_cast<int8_t>(payload[index + 1]), 0,
+                               0)) {
+          return kHIDFailure;
+        }
+      }
+      return kOK;
+
+    case kMouseMoveRelativeBatch:
+      if (!validateRelativeMouseBatchPayload(payload, payloadLength)) {
+        return kBadPayload;
+      }
+      for (uint8_t index = 0; index < payloadLength; index += 2) {
+        if (!ToolboxMouse.move(static_cast<int8_t>(payload[index]),
+                               static_cast<int8_t>(payload[index + 1]), 0,
+                               0)) {
+          return kHIDFailure;
+        }
+      }
+      return kOK;
 
     case kReleaseAll:
       if (payloadLength != 0) {

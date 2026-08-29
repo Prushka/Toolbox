@@ -68,6 +68,8 @@ func capabilityNames(capabilities hid.Capability) []string {
 		{hid.CapabilityAbsoluteMouse, "absolute mouse"},
 		{hid.CapabilityHorizontalWheel, "horizontal wheel"},
 		{hid.CapabilityUSBDetach, "USB detach"},
+		{hid.CapabilityBatchedLinearMouse, "batched linear mouse"},
+		{hid.CapabilityBatchedRelativeMouse, "batched relative mouse"},
 	}
 	names := make([]string, 0, len(known))
 	for _, capability := range known {

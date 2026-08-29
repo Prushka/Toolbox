@@ -32,7 +32,7 @@ Key design decisions are:
 | Generate input on the Leonardo | Windows uses its built-in USB HID stack; no host input-emulation driver is needed. |
 | Keep CDC, keyboard, and mouse in one composite device | One cable carries commands and HID reports, but all interfaces share one USB identity and the CDC topology remains observable. |
 | Apply USB identity through compile properties | Avoids patching Arduino core files or `boards.txt`; the result is compatible identification, not an exact Logitech descriptor clone. |
-| Use separate absolute and relative mouse reports | Supports pixel jumps, accelerated relative motion, five buttons, and two wheel axes; only the relative report owns buttons to avoid split state. |
+| Use separate absolute and relative mouse reports | Supports pixel jumps, accelerated relative motion, five buttons, and two wheel axes; standard report ID 1 owns buttons 1-3, while report ID 4 owns buttons 4-5. |
 | Allow one acknowledged command in flight | Matches the firmware's single-threaded loop, bounds AVR memory, and makes response matching deterministic. |
 | Use typed Go calls and composable actions | Avoids an AHK-style command language while retaining explicit contexts, errors, and reusable workflows. |
 | Validate on both host and firmware | Go returns mistakes early; firmware remains safe when driven by another serial client. |
@@ -99,26 +99,34 @@ use a UART baud rate, but this conventional value keeps tooling predictable.
 
 ## Firmware
 
-The current firmware reports version `1.3`. The sketch includes Arduino's
-`Keyboard` and low-level `HID` libraries and appends a custom mouse descriptor
-with one relative Mouse application collection:
+The current firmware reports version `1.8`. The sketch includes Arduino's
+`Keyboard` and low-level `HID` libraries and appends custom mouse descriptors:
 
-- Report ID `4`: five-button relative pointer with signed 8-bit X/Y,
-  vertical wheel, and horizontal AC Pan, each in `-127..127`.
+- Standard report ID `1`: buttons 1-3, signed 8-bit X/Y, and vertical wheel.
+
+- Report ID `3`: absolute pointer with button fields held at zero and unsigned
+  16-bit X/Y in `0..32767`.
+
+- Report ID `4`: buttons 4-5 and horizontal AC Pan in `-127..127`; its X/Y and
+  vertical-wheel fields remain zero.
 
 Movement, wheels, and buttons therefore belong to the same emulated pointer in
-both Windows and raw-input applications. Firmware 1.3 does not advertise the
-absolute-pointer capability; `MoveTo` performs host-side closed-loop relative
-movement using read-only Windows cursor feedback.
+both Windows and raw-input applications. Firmware 1.8 advertises absolute
+pointer, batched-linear-mouse, and batched-relative-mouse capabilities.
+`MoveTo` uses one absolute report. `MoveToWindow` batches full-size reports
+only while clamping a raw-input pointer to the client edge, then uses
+individually acknowledged small reports for exact target alignment.
 
 The relative button mask is kept in RAM and rolled back when a HID report fails.
+Standard mouse reports bypass Arduino's void-returning `Mouse` calls so a USB
+send failure cannot be acknowledged as success.
 Keyboard HID failures call `Keyboard.releaseAll()`. Startup emits an all-released
 state. Keyboard payloads use Arduino Keyboard 1.0.7 values: printable US-ASCII,
 modifiers, navigation, keypad keys, Menu, and F13-F24. Both Go and firmware
 reject unsupported values, duplicates, and more than six non-modifier keys.
 
 At the audited Arduino AVR 1.8.8 and Keyboard 1.0.7 versions, the sketch uses
-7,134 bytes (24%) of flash and 322 bytes (12%) of SRAM on a Leonardo. Package
+7,610 bytes (26%) of flash and 337 bytes (13%) of SRAM on a Leonardo. Package
 updates can change those figures slightly.
 
 The firmware loop is single-threaded: parse one complete CDC frame, execute one
@@ -167,6 +175,8 @@ after a timeout.
 | `0x22` | Mouse button down | five-bit mask |
 | `0x23` | Mouse button up | five-bit mask |
 | `0x24` | Release mouse | empty |
+| `0x25` | Batched linear move | 1..32 `dx, dy` signed-byte pairs, each axis in `[-4, 4]` |
+| `0x26` | Batched relative move | 1..32 `dx, dy` signed-byte pairs |
 | `0x30` | Release keyboard and mouse | empty |
 | `0x31` | Detach and reattach USB | little-endian milliseconds |
 
@@ -183,7 +193,8 @@ Response statuses are:
 
 Info reports firmware major/minor, protocol version, capability bits, maximum
 payload, and watchdog seconds. Current capabilities are keyboard, relative
-mouse, horizontal wheel, and USB detach/attach.
+mouse, absolute mouse, horizontal wheel, USB detach/attach, batched linear
+mouse movement, and batched relative mouse movement.
 
 ## Go client and concurrency
 
@@ -243,12 +254,27 @@ Mouse button constants map directly to the five-bit report: left `0x01`, right
 passed together and are combined into one report mask.
 
 Large relative movements and scrolls split into signed 8-bit reports.
+When firmware advertises batched linear mouse movement, `MoveLinear` packs up
+to 32 four-count-or-smaller relative reports into one acknowledged command.
+The firmware validates every pair before sending any HID report. Older
+firmware and custom `NewClient` transports retain one command per report.
 `MoveAbsolute` remains available for compatible older firmware that advertises
-absolute HID support. Windows `MoveTo` and `MoveToRelative` reach a primary-
-display pixel with relative HID reports and cursor feedback, then allow raw-
-input consumers to drain the final movement reports before returning.
-`MoveToWindow` aligns a foreground raw-input pointer and the Windows cursor;
-this lets a caller align before pressing a key that enters a placement mode.
+absolute HID support. Windows `MoveTo` uses absolute movement;
+`MoveToRelative` reaches a primary-display pixel with relative HID reports and
+cursor feedback, then allows raw-input consumers to drain the final movement
+reports before returning.
+`MoveToWindow` negotiates relative-mouse capabilities before its first
+calibration report, so callers using `NewClient` receive the same batching
+behavior as callers using `Open`.
+`MoveToWindow` aligns a foreground raw-input pointer and the Windows cursor.
+It observes stable physical cursor feedback at the virtual-desktop calibration
+edge. Windows
+acceleration means the later raw-input alignment phase does not share its
+client-coordinate endpoint with the OS cursor, so absolute alignment follows
+that phase and may reassert only the same button-free position after one second
+of abnormal cursor delay. This remains bounded to seven seconds and never
+repeats a click. Callers can align before pressing a key that enters a placement
+mode.
 `ClickAtWindow` aligns and clicks in one call. It verifies that another physical
 mouse did not move between alignment and button-down, recalibrating and retrying
 when needed. Targeted `ClickAt` adds a rendered-frame settlement period before
@@ -256,7 +282,7 @@ its Arduino click.
 `ClickPreparedWindow` performs no movement: it clicks only when the live cursor
 still matches the exact target prepared by `MoveToWindow`, returning
 `ErrWindowPointerMoved` after another mouse changes that position.
-movement uses small HID deltas that stay in Windows' 1:1 range, preventing
+`MoveToWindow` uses small HID deltas that stay in Windows' 1:1 range, preventing
 pointer acceleration from separating the OS cursor from raw-input applications.
 
 `Type` validates the complete input before sending it, accepts printable

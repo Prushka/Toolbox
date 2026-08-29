@@ -98,7 +98,10 @@ func assertCommand(t *testing.T, frame wireFrame, operation opcode, payload []by
 }
 
 func TestInfoAndPing(t *testing.T) {
-	infoPayload := []byte{1, 7, protocolVersion, 0x1F, 0, maxPayload, 30}
+	wantCapabilities := CapabilityKeyboard | CapabilityRelativeMouse |
+		CapabilityAbsoluteMouse | CapabilityHorizontalWheel | CapabilityUSBDetach |
+		CapabilityBatchedLinearMouse | CapabilityBatchedRelativeMouse
+	infoPayload := []byte{1, 8, protocolVersion, byte(wantCapabilities), byte(wantCapabilities >> 8), maxPayload, 30}
 	harness := newClientHarness(t, func(request wireFrame) harnessResponse {
 		if opcode(request.code) == opInfo {
 			return harnessResponse{respond: true, payload: infoPayload}
@@ -111,8 +114,8 @@ func TestInfoAndPing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.FirmwareMajor != 1 || info.FirmwareMinor != 7 || info.ProtocolVersion != protocolVersion ||
-		info.Capabilities != 0x1F || info.MaximumPayload != maxPayload || info.WatchdogTimeout != 30*time.Second {
+	if info.FirmwareMajor != 1 || info.FirmwareMinor != 8 || info.ProtocolVersion != protocolVersion ||
+		info.Capabilities != wantCapabilities || info.MaximumPayload != maxPayload || info.WatchdogTimeout != 30*time.Second {
 		t.Fatalf("unexpected info: %#v", info)
 	}
 	if err := harness.client.Ping(ctx); err != nil {
@@ -120,6 +123,29 @@ func TestInfoAndPing(t *testing.T) {
 	}
 	assertCommand(t, harness.next(t), opInfo, nil)
 	assertCommand(t, harness.next(t), opPing, nil)
+}
+
+func TestEnsureRelativeMouseSupportNegotiatesBeforeMovement(t *testing.T) {
+	capabilities := CapabilityRelativeMouse | CapabilityBatchedLinearMouse | CapabilityBatchedRelativeMouse
+	infoPayload := []byte{1, 8, protocolVersion, byte(capabilities), byte(capabilities >> 8), maxPayload, 30}
+	harness := newClientHarness(t, func(request wireFrame) harnessResponse {
+		if opcode(request.code) == opInfo {
+			return harnessResponse{respond: true, payload: infoPayload}
+		}
+		return harnessResponse{respond: true}
+	})
+	ctx := context.Background()
+	if err := harness.client.ensureRelativeMouseSupport(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := harness.client.relativeBatchPayloadLimit(); got != maxPayload {
+		t.Fatalf("relative batch payload limit = %d, want %d", got, maxPayload)
+	}
+	if err := harness.client.moveRelativeReportsForCalibration(ctx, 300, -300); err != nil {
+		t.Fatal(err)
+	}
+	assertCommand(t, harness.next(t), opInfo, nil)
+	assertCommand(t, harness.next(t), opMouseMoveRelativeBatch, []byte{127, 129, 127, 129, 46, 210})
 }
 
 func TestDeviceError(t *testing.T) {
@@ -370,7 +396,7 @@ func TestRelativeMoveAndScrollChunking(t *testing.T) {
 	assertCommand(t, harness.next(t), opMouseMove, []byte{0, 0, 0, 1})
 }
 
-func TestLinearMoveUsesFourCountReports(t *testing.T) {
+func TestLinearMoveWithoutBatchCapabilityUsesFourCountReports(t *testing.T) {
 	harness := newClientHarness(t, nil)
 	if err := harness.client.MoveLinear(context.Background(), 10, -9); err != nil {
 		t.Fatal(err)
@@ -378,6 +404,84 @@ func TestLinearMoveUsesFourCountReports(t *testing.T) {
 	assertCommand(t, harness.next(t), opMouseMove, []byte{4, 252, 0, 0})
 	assertCommand(t, harness.next(t), opMouseMove, []byte{4, 252, 0, 0})
 	assertCommand(t, harness.next(t), opMouseMove, []byte{2, 255, 0, 0})
+}
+
+func TestLinearMoveBatchesFourCountReports(t *testing.T) {
+	harness := newClientHarness(t, nil)
+	harness.client.infoMu.Lock()
+	harness.client.info = Info{Capabilities: CapabilityBatchedLinearMouse, MaximumPayload: maxPayload}
+	harness.client.infoKnown = true
+	harness.client.infoMu.Unlock()
+
+	if err := harness.client.MoveLinear(context.Background(), 10, -9); err != nil {
+		t.Fatal(err)
+	}
+	assertCommand(t, harness.next(t), opMouseMoveLinearBatch, []byte{4, 252, 4, 252, 2, 255})
+}
+
+func TestWindowTargetMoveDoesNotBatchFourCountReports(t *testing.T) {
+	harness := newClientHarness(t, nil)
+	harness.client.infoMu.Lock()
+	harness.client.info = Info{Capabilities: CapabilityBatchedLinearMouse, MaximumPayload: maxPayload}
+	harness.client.infoKnown = true
+	harness.client.infoMu.Unlock()
+
+	if err := harness.client.moveWindowTargetReports(context.Background(), 10, -9); err != nil {
+		t.Fatal(err)
+	}
+	assertCommand(t, harness.next(t), opMouseMove, []byte{4, 252, 0, 0})
+	assertCommand(t, harness.next(t), opMouseMove, []byte{4, 252, 0, 0})
+	assertCommand(t, harness.next(t), opMouseMove, []byte{2, 255, 0, 0})
+}
+
+func TestLinearMoveSplitsBatchesAtPayloadLimit(t *testing.T) {
+	harness := newClientHarness(t, nil)
+	harness.client.infoMu.Lock()
+	harness.client.info = Info{Capabilities: CapabilityBatchedLinearMouse, MaximumPayload: maxPayload}
+	harness.client.infoKnown = true
+	harness.client.infoMu.Unlock()
+
+	if err := harness.client.MoveLinear(context.Background(), 132, 0); err != nil {
+		t.Fatal(err)
+	}
+	batch := harness.next(t)
+	if opcode(batch.code) != opMouseMoveLinearBatch || len(batch.payload) != maxPayload {
+		t.Fatalf("first batch = {op: 0x%02X, payload: %v}, want 32 linear reports", batch.code, batch.payload)
+	}
+	for index := 0; index < len(batch.payload); index += 2 {
+		if batch.payload[index] != 4 || batch.payload[index+1] != 0 {
+			t.Fatalf("first batch report %d = (%d, %d), want (4, 0)", index/2, int8(batch.payload[index]), int8(batch.payload[index+1]))
+		}
+	}
+	assertCommand(t, harness.next(t), opMouseMoveLinearBatch, []byte{4, 0})
+}
+
+func TestLinearMoveRespectsNegotiatedPayloadLimit(t *testing.T) {
+	harness := newClientHarness(t, nil)
+	harness.client.infoMu.Lock()
+	harness.client.info = Info{Capabilities: CapabilityBatchedLinearMouse, MaximumPayload: 4}
+	harness.client.infoKnown = true
+	harness.client.infoMu.Unlock()
+
+	if err := harness.client.MoveLinear(context.Background(), 12, 0); err != nil {
+		t.Fatal(err)
+	}
+	assertCommand(t, harness.next(t), opMouseMoveLinearBatch, []byte{4, 0, 4, 0})
+	assertCommand(t, harness.next(t), opMouseMoveLinearBatch, []byte{4, 0})
+}
+
+func TestRelativeCalibrationMoveBatchesReports(t *testing.T) {
+	harness := newClientHarness(t, nil)
+	harness.client.infoMu.Lock()
+	harness.client.info = Info{Capabilities: CapabilityBatchedRelativeMouse, MaximumPayload: 4}
+	harness.client.infoKnown = true
+	harness.client.infoMu.Unlock()
+
+	if err := harness.client.moveRelativeReportsForCalibration(context.Background(), 300, -300); err != nil {
+		t.Fatal(err)
+	}
+	assertCommand(t, harness.next(t), opMouseMoveRelativeBatch, []byte{127, 129, 127, 129})
+	assertCommand(t, harness.next(t), opMouseMoveRelativeBatch, []byte{46, 210})
 }
 
 func TestAbsoluteMovement(t *testing.T) {

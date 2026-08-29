@@ -21,9 +21,28 @@ var (
 
 const dpiAwarenessContextPerMonitorAwareV2 = ^uintptr(3) // DPI_AWARENESS_CONTEXT(-4)
 
+const (
+	smXVirtualScreen  = 76
+	smYVirtualScreen  = 77
+	smCXVirtualScreen = 78
+	smCYVirtualScreen = 79
+)
+
 const pointerSettleTimeout = 5 * time.Second
 
-const absolutePointerSettleTimeout = time.Second
+// Foreground raw-input applications can stop processing pointer state for
+// several seconds during a frame stall. Wait through one observed five-second
+// stall before deciding that the Windows cursor did not receive an acknowledged
+// absolute report.
+const absolutePointerSettleTimeout = 7 * time.Second
+
+const absolutePointerReassertDelay = time.Second
+
+const absolutePointerReassertInterval = 250 * time.Millisecond
+
+const windowPointerCalibrationTimeout = 7 * time.Second
+
+const cursorTargetStableDuration = 25 * time.Millisecond
 
 const cursorReportSettleTimeout = 10 * time.Millisecond
 
@@ -35,6 +54,34 @@ const rawInputSettleDelay = 350 * time.Millisecond
 type cursorPoint struct {
 	x int32
 	y int32
+}
+
+type virtualDesktop struct {
+	left   int
+	top    int
+	width  int
+	height int
+}
+
+func readVirtualDesktop(metric func(int) int) (virtualDesktop, error) {
+	if metric == nil {
+		return virtualDesktop{}, errors.New("hid: system metric reader is nil")
+	}
+	desktop := virtualDesktop{
+		left:   metric(smXVirtualScreen),
+		top:    metric(smYVirtualScreen),
+		width:  metric(smCXVirtualScreen),
+		height: metric(smCYVirtualScreen),
+	}
+	if desktop.width < 2 || desktop.height < 2 {
+		return virtualDesktop{}, errors.New("hid: Windows returned invalid virtual display dimensions")
+	}
+	return desktop, nil
+}
+
+func systemMetric(index int) int {
+	value, _, _ := getSystemMetricsProc.Call(uintptr(index))
+	return int(int32(value))
 }
 
 // CursorPosition returns the current Windows cursor position in primary
@@ -54,6 +101,12 @@ func cursorPosition() (int, int, error) {
 	return int(point.x), int(point.y), nil
 }
 
+func physicalCursorPosition() (int, int, error) {
+	restoreDPI := usePhysicalScreenCoordinates()
+	defer restoreDPI()
+	return cursorPosition()
+}
+
 // MoveTo jumps to a pixel on the Windows primary display using an absolute HID
 // report. Use MoveToRelative or MoveToWindow for applications that must observe
 // relative movement.
@@ -71,8 +124,9 @@ func (client *Client) ClickAt(ctx context.Context, x, y int, buttons ...Button) 
 }
 
 // MoveToAbsoluteScreen jumps the Windows cursor to a physical primary-display
-// pixel with one absolute Arduino HID report. Raw-input applications may ignore
-// this report; use ClickAtWindow when their internal pointer must also align.
+// pixel with an absolute Arduino HID report. It may reassert that same
+// button-free position after abnormal cursor delay. Raw-input applications may
+// ignore absolute reports; use ClickAtWindow when their pointer must also align.
 func (client *Client) MoveToAbsoluteScreen(ctx context.Context, x, y int) error {
 	if err := client.moveToAbsoluteScreen(ctx, x, y); err != nil {
 		return err
@@ -96,9 +150,9 @@ func (client *Client) moveToAbsoluteScreen(ctx context.Context, x, y int) error 
 		return errors.New("hid: firmware does not support absolute mouse input")
 	}
 	restoreDPI := usePhysicalScreenCoordinates()
-	defer restoreDPI()
 	width, _, _ := getSystemMetricsProc.Call(0)
 	height, _, _ := getSystemMetricsProc.Call(1)
+	restoreDPI()
 	if width < 2 || height < 2 {
 		return errors.New("hid: Windows returned invalid display dimensions")
 	}
@@ -107,10 +161,16 @@ func (client *Client) moveToAbsoluteScreen(ctx context.Context, x, y int) error 
 	}
 	normalizedX := uint16((uint64(x)*32767 + uint64(width-1)/2) / uint64(width-1))
 	normalizedY := uint16((uint64(y)*32767 + uint64(height-1)/2) / uint64(height-1))
-	if err := client.moveAbsoluteReport(ctx, normalizedX, normalizedY); err != nil {
+	deadline := time.Now().Add(absolutePointerSettleTimeout)
+	reportCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	reassert := func() error {
+		return client.moveAbsoluteReport(reportCtx, normalizedX, normalizedY)
+	}
+	if err := reassert(); err != nil {
 		return err
 	}
-	return waitForCursorTarget(ctx, x, y, time.Now().Add(absolutePointerSettleTimeout))
+	return waitForCursorTarget(ctx, "absolute", x, y, deadline, reassert)
 }
 
 // MoveToWindow aligns both a foreground raw-input pointer and the Windows
@@ -125,22 +185,35 @@ func (client *Client) MoveToWindow(ctx context.Context, screenX, screenY, client
 	if clientX < 0 || clientY < 0 {
 		return errors.New("hid: client target cannot be negative")
 	}
+	// Negotiate before calibration. Otherwise an uninitialized Client falls
+	// back to one acknowledged command per report for its first movement.
+	if err := client.ensureRelativeMouseSupport(ctx); err != nil {
+		return err
+	}
 	restoreDPI := usePhysicalScreenCoordinates()
-	width, _, _ := getSystemMetricsProc.Call(0)
-	height, _, _ := getSystemMetricsProc.Call(1)
+	desktop, err := readVirtualDesktop(systemMetric)
 	restoreDPI()
-	if width < 2 || height < 2 {
-		return errors.New("hid: Windows returned invalid display dimensions")
+	if err != nil {
+		return err
 	}
 	client.windowPointerMu.Lock()
 	defer client.windowPointerMu.Unlock()
-	currentX, currentY, err := cursorPosition()
+	currentX, currentY, err := physicalCursorPosition()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
 	feedbackAvailable := err == nil
 	if err != nil && !cursorFeedbackUnavailable(err) {
 		return err
 	}
+	// The last MoveToWindow already calibrated and settled this exact raw-input
+	// target. Repeating an absolute report cannot improve its position, and the
+	// extra settlement delay only slows a follow-up click at the same point.
+	if feedbackAvailable && preparedWindowPointer(client.windowPointer, currentX, currentY, screenX, screenY, clientX, clientY) {
+		return nil
+	}
 	if feedbackAvailable && reusableWindowPointer(client.windowPointer, currentX, currentY, screenX, screenY, clientX, clientY) {
-		if err := client.moveLinearReports(ctx, clientX-client.windowPointer.clientX, clientY-client.windowPointer.clientY); err != nil {
+		if err := client.moveWindowTargetReports(ctx, clientX-client.windowPointer.clientX, clientY-client.windowPointer.clientY); err != nil {
 			client.windowPointer.valid = false
 			return err
 		}
@@ -148,38 +221,53 @@ func (client *Client) MoveToWindow(ctx context.Context, screenX, screenY, client
 			client.windowPointer.valid = false
 			return err
 		}
-		client.windowPointer = windowPointerState{
+		prepared := windowPointerState{
 			valid: true, screenX: screenX, screenY: screenY,
 			originX: screenX - clientX, originY: screenY - clientY,
 			clientX: clientX, clientY: clientY,
 		}
-		return waitContext(ctx, rawInputSettleDelay)
+		return settleWindowPointer(ctx, &client.windowPointer, prepared)
 	}
 	client.windowPointer.valid = false
-	// Overshoot the primary display in both directions so a foreground raw-
-	// input application clamps its independent pointer to client (0,0).
-	if err := client.moveRelativeReports(ctx, -int(width)*2, -int(height)*2); err != nil {
+	// Overshoot the virtual desktop in both directions so a foreground raw-input
+	// application clamps its independent pointer to the client edge.
+	if err := client.moveRelativeReportsForCalibration(ctx, -desktop.width*2, -desktop.height*2); err != nil {
 		return err
 	}
-	if err := waitContext(ctx, 50*time.Millisecond); err != nil {
+	if err := waitForWindowCursorCalibration(ctx, desktop.left, desktop.top); err != nil {
 		return err
 	}
-	if err := client.moveLinearReports(ctx, clientX, clientY); err != nil {
+	if err := client.moveWindowTargetReports(ctx, clientX, clientY); err != nil {
 		return err
 	}
+	// Windows pointer acceleration means this phase's OS endpoint is not the
+	// raw-input client coordinate. The firmware has acknowledged every small
+	// report; retain a short drain period before absolute OS alignment.
 	if err := waitContext(ctx, 100*time.Millisecond); err != nil {
 		return err
 	}
 	if err := client.moveToAbsoluteScreen(ctx, screenX, screenY); err != nil {
 		return err
 	}
-	client.windowPointer = windowPointerState{
+	prepared := windowPointerState{
 		valid: true, screenX: screenX, screenY: screenY,
 		originX: screenX - clientX, originY: screenY - clientY,
 		clientX: clientX, clientY: clientY,
 	}
-	return waitContext(ctx, rawInputSettleDelay)
+	return settleWindowPointer(ctx, &client.windowPointer, prepared)
 
+}
+
+func settleWindowPointer(ctx context.Context, cached *windowPointerState, prepared windowPointerState) error {
+	cached.valid = false
+	if err := waitContext(ctx, rawInputSettleDelay); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	*cached = prepared
+	return nil
 }
 
 // ClickAtWindow aligns both pointer coordinate systems and clicks.
@@ -209,7 +297,11 @@ func (client *Client) ClickPreparedWindow(ctx context.Context, screenX, screenY,
 	}
 	client.windowPointerMu.Lock()
 	defer client.windowPointerMu.Unlock()
-	currentX, currentY, err := cursorPosition()
+	currentX, currentY, err := physicalCursorPosition()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		client.windowPointer.valid = false
+		return ctxErr
+	}
 	if err != nil {
 		client.windowPointer.valid = false
 		return errors.Join(ErrWindowPointerMoved, err)
@@ -291,7 +383,8 @@ func preparedWindowPointer(cached windowPointerState, currentX, currentY, screen
 	return cached.valid &&
 		absInt(currentX-cached.screenX) <= 1 && absInt(currentY-cached.screenY) <= 1 &&
 		cached.screenX == screenX && cached.screenY == screenY &&
-		cached.clientX == clientX && cached.clientY == clientY
+		cached.clientX == clientX && cached.clientY == clientY &&
+		cached.originX == screenX-clientX && cached.originY == screenY-clientY
 }
 
 func screenDeltaToHID(value int) int {
@@ -336,27 +429,88 @@ func waitForCursorChange(ctx context.Context, previousX, previousY int, deadline
 	}
 }
 
-func waitForCursorTarget(ctx context.Context, targetX, targetY int, deadline time.Time) error {
+func waitForWindowCursorCalibration(ctx context.Context, targetX, targetY int) error {
+	return waitForCursorTarget(ctx, "window calibration", targetX, targetY, time.Now().Add(windowPointerCalibrationTimeout), nil, true)
+}
+
+func waitForCursorTarget(ctx context.Context, kind string, targetX, targetY int, deadline time.Time, reassert func() error, requireFeedback ...bool) error {
+	restoreDPI := usePhysicalScreenCoordinates()
+	defer restoreDPI()
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()
-	for {
-		currentX, currentY, err := cursorPosition()
-		if err != nil {
-			if cursorFeedbackUnavailable(err) {
-				return waitContext(ctx, cursorReportSettleTimeout)
-			}
-			return err
-		}
-		if absInt(targetX-currentX) <= 1 && absInt(targetY-currentY) <= 1 {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("hid: absolute pointer did not settle at (%d, %d); current position is (%d, %d)", targetX, targetY, currentX, currentY)
-		}
+	required := len(requireFeedback) != 0 && requireFeedback[0]
+	return waitForCursorTargetWithFeedback(ctx, kind, targetX, targetY, deadline, cursorPosition, time.Now, func(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+			return nil
+		}
+	}, reassert, required)
+}
+
+func waitForCursorTargetWithFeedback(
+	ctx context.Context,
+	kind string,
+	targetX, targetY int,
+	deadline time.Time,
+	position func() (int, int, error),
+	now func() time.Time,
+	poll func(context.Context) error,
+	reassert func() error,
+	requireFeedback ...bool,
+) error {
+	required := len(requireFeedback) != 0 && requireFeedback[0]
+	var targetObservedAt time.Time
+	var nextReassertAt time.Time
+	if reassert != nil {
+		nextReassertAt = now().Add(absolutePointerReassertDelay)
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		currentX, currentY, err := position()
+		if err != nil {
+			if cursorFeedbackUnavailable(err) && !required {
+				return waitContext(ctx, cursorReportSettleTimeout)
+			}
+			return err
+		}
+		// GetCursorPos can complete after a caller deadline (for example while
+		// the desktop is stalled). Its result must not authorize success.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		observedAt := now()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !observedAt.Before(deadline) {
+			return fmt.Errorf("hid: %s pointer did not settle at (%d, %d); current position is (%d, %d)", kind, targetX, targetY, currentX, currentY)
+		}
+		atTarget := absInt(targetX-currentX) <= 1 && absInt(targetY-currentY) <= 1
+		if atTarget {
+			if targetObservedAt.IsZero() {
+				targetObservedAt = observedAt
+			}
+			if observedAt.Sub(targetObservedAt) >= cursorTargetStableDuration {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return nil
+			}
+		} else {
+			targetObservedAt = time.Time{}
+		}
+		if !atTarget && reassert != nil && !observedAt.Before(nextReassertAt) {
+			if err := reassert(); err != nil {
+				return err
+			}
+			nextReassertAt = observedAt.Add(absolutePointerReassertInterval)
+		}
+		if err := poll(ctx); err != nil {
+			return err
 		}
 	}
 }

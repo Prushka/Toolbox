@@ -4,6 +4,7 @@ package hid
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -41,11 +42,12 @@ func TestLeonardoHardwareSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.FirmwareMajor != 1 || info.FirmwareMinor < 4 {
-		t.Fatalf("firmware version = %d.%d, want at least 1.4", info.FirmwareMajor, info.FirmwareMinor)
+	if info.FirmwareMajor != 1 || info.FirmwareMinor < 8 {
+		t.Fatalf("firmware version = %d.%d, want at least 1.8", info.FirmwareMajor, info.FirmwareMinor)
 	}
 	wantCapabilities := CapabilityKeyboard | CapabilityRelativeMouse |
-		CapabilityAbsoluteMouse | CapabilityHorizontalWheel | CapabilityUSBDetach
+		CapabilityAbsoluteMouse | CapabilityHorizontalWheel | CapabilityUSBDetach |
+		CapabilityBatchedLinearMouse | CapabilityBatchedRelativeMouse
 	if info.Capabilities&wantCapabilities != wantCapabilities {
 		t.Fatalf("capabilities = 0x%04X, missing 0x%04X", info.Capabilities, wantCapabilities)
 	}
@@ -88,6 +90,20 @@ func TestLeonardoHardwareSmoke(t *testing.T) {
 	}
 	if err := device.Move(ctx, -1, 0); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := device.transact(ctx, opMouseMoveLinearBatch, []byte{0, 0}); err != nil {
+		t.Fatalf("linear mouse batch: %v", err)
+	}
+	if _, err := device.transact(ctx, opMouseMoveRelativeBatch, []byte{0, 0}); err != nil {
+		t.Fatalf("relative mouse batch: %v", err)
+	}
+	if _, err := device.transact(ctx, opMouseMoveRelativeBatch, []byte{0x80, 0}); err == nil {
+		t.Fatal("relative mouse batch accepted HID delta -128")
+	} else {
+		var deviceErr *DeviceError
+		if !errors.As(err, &deviceErr) || status(deviceErr.Status) != statusBadPayload {
+			t.Fatalf("relative mouse batch -128 error = %v, want bad-payload DeviceError", err)
+		}
 	}
 	originalX, originalY, err := CursorPosition()
 	if err != nil {

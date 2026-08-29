@@ -33,6 +33,8 @@ const (
 	CapabilityAbsoluteMouse
 	CapabilityHorizontalWheel
 	CapabilityUSBDetach
+	CapabilityBatchedLinearMouse
+	CapabilityBatchedRelativeMouse
 )
 
 // Info is returned by the board during connection negotiation.
@@ -396,6 +398,20 @@ func (client *Client) supports(ctx context.Context, capability Capability) (bool
 	return info.Capabilities&capability != 0, nil
 }
 
+// ensureRelativeMouseSupport negotiates firmware capabilities before a
+// window-targeted movement can emit any relative reports. MoveToWindow uses
+// the negotiated batch limits for its first calibration and exact alignment.
+func (client *Client) ensureRelativeMouseSupport(ctx context.Context) error {
+	supported, err := client.supports(ctx, CapabilityRelativeMouse)
+	if err != nil {
+		return err
+	}
+	if !supported {
+		return errors.New("hid: firmware does not support relative mouse input")
+	}
+	return nil
+}
+
 // KeyDown holds one or more keys. A standard boot keyboard report can hold at
 // most six non-modifier keys at once; modifiers do not count toward that limit.
 func (client *Client) KeyDown(ctx context.Context, keys ...Key) error {
@@ -576,6 +592,100 @@ func (client *Client) MoveLinear(ctx context.Context, dx, dy int) error {
 }
 
 func (client *Client) moveLinearReports(ctx context.Context, dx, dy int) error {
+	if payloadLimit := client.linearBatchPayloadLimit(); payloadLimit != 0 {
+		return client.moveLinearBatches(ctx, dx, dy, payloadLimit)
+	}
+	return client.moveLinearReportsIndividually(ctx, dx, dy)
+}
+
+// moveWindowTargetReports paces exact raw-pointer alignment through one
+// acknowledged command per four-count report. Rapid firmware-side batches are
+// suitable for deliberate edge clamping, but a foreground raw-input consumer
+// can observe only part of such a burst while its render loop is stalled.
+func (client *Client) moveWindowTargetReports(ctx context.Context, dx, dy int) error {
+	return client.moveLinearReportsIndividually(ctx, dx, dy)
+}
+
+// moveRelativeReportsForCalibration reaches a clamped raw-input edge quickly.
+// It must not be used for cursor-targeted movement: large reports can be
+// accelerated by Windows, but that is harmless while deliberately leaving the
+// target window.
+func (client *Client) moveRelativeReportsForCalibration(ctx context.Context, dx, dy int) error {
+	if payloadLimit := client.relativeBatchPayloadLimit(); payloadLimit != 0 {
+		return client.moveRelativeBatches(ctx, dx, dy, payloadLimit)
+	}
+	return client.moveRelativeReports(ctx, dx, dy)
+}
+
+func (client *Client) linearBatchPayloadLimit() int {
+	client.infoMu.RLock()
+	defer client.infoMu.RUnlock()
+	if !client.infoKnown || client.info.Capabilities&CapabilityBatchedLinearMouse == 0 {
+		return 0
+	}
+	payloadLimit := int(client.info.MaximumPayload)
+	if payloadLimit > maxPayload {
+		payloadLimit = maxPayload
+	}
+	payloadLimit &^= 1
+	if payloadLimit < 2 {
+		return 0
+	}
+	return payloadLimit
+}
+
+func (client *Client) relativeBatchPayloadLimit() int {
+	client.infoMu.RLock()
+	defer client.infoMu.RUnlock()
+	if !client.infoKnown || client.info.Capabilities&CapabilityBatchedRelativeMouse == 0 {
+		return 0
+	}
+	payloadLimit := int(client.info.MaximumPayload)
+	if payloadLimit > maxPayload {
+		payloadLimit = maxPayload
+	}
+	payloadLimit &^= 1
+	if payloadLimit < 2 {
+		return 0
+	}
+	return payloadLimit
+}
+
+func (client *Client) moveLinearBatches(ctx context.Context, dx, dy, payloadLimit int) error {
+	for dx != 0 || dy != 0 {
+		payload := make([]byte, 0, payloadLimit)
+		for len(payload) < payloadLimit && (dx != 0 || dy != 0) {
+			x := clampLinearDelta(dx)
+			y := clampLinearDelta(dy)
+			payload = append(payload, byte(int8(x)), byte(int8(y)))
+			dx -= x
+			dy -= y
+		}
+		if _, err := client.transact(ctx, opMouseMoveLinearBatch, payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (client *Client) moveRelativeBatches(ctx context.Context, dx, dy, payloadLimit int) error {
+	for dx != 0 || dy != 0 {
+		payload := make([]byte, 0, payloadLimit)
+		for len(payload) < payloadLimit && (dx != 0 || dy != 0) {
+			x := clampDelta(dx)
+			y := clampDelta(dy)
+			payload = append(payload, byte(int8(x)), byte(int8(y)))
+			dx -= x
+			dy -= y
+		}
+		if _, err := client.transact(ctx, opMouseMoveRelativeBatch, payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (client *Client) moveLinearReportsIndividually(ctx context.Context, dx, dy int) error {
 	for dx != 0 || dy != 0 {
 		x := clampLinearDelta(dx)
 		y := clampLinearDelta(dy)

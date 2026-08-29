@@ -348,8 +348,14 @@ func WaitForStableBitmap(ctx context.Context, capture func() (*Bitmap, error), o
 		return ErrInvalidArgument
 	}
 	options = defaultFrameStabilityOptions(options)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	previous, err := capture()
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if previous == nil || !previous.valid() {
@@ -367,6 +373,9 @@ func WaitForStableBitmap(ctx context.Context, capture func() (*Bitmap, error), o
 		if err != nil {
 			return err
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if current == nil || !current.valid() {
 			return ErrInvalidArgument
 		}
@@ -377,6 +386,49 @@ func WaitForStableBitmap(ctx context.Context, capture func() (*Bitmap, error), o
 		}
 		previous = current
 		if stableFrames >= options.ConsecutiveFrames {
+			return nil
+		}
+	}
+}
+
+// WaitForBitmapChange polls capture until the current frame differs from the
+// initial frame. It is useful as a render-progress gate before input: a caller
+// can distinguish an application that is presenting frames from one whose
+// visible content is temporarily frozen.
+func WaitForBitmapChange(ctx context.Context, capture func() (*Bitmap, error), options FrameStabilityOptions) error {
+	if !validFrameWait(ctx, capture, options) {
+		return ErrInvalidArgument
+	}
+	options = defaultFrameStabilityOptions(options)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	initial, err := capture()
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if initial == nil || !initial.valid() {
+		return ErrInvalidArgument
+	}
+	for {
+		if err := Sleep(ctx, options.Interval); err != nil {
+			return err
+		}
+		current, err := capture()
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if current == nil || !current.valid() ||
+			current.Width != initial.Width || current.Height != initial.Height {
+			return ErrInvalidArgument
+		}
+		if !BitmapsSimilar(initial, current, options.PixelTolerance, options.MaxChangedFraction) {
 			return nil
 		}
 	}
@@ -403,10 +455,19 @@ func WaitForBitmapTransition(
 	if err != nil {
 		return err
 	}
+	// Native capture can block while Windows copies a frozen game frame. The
+	// context may expire during that call; never dispatch a non-idempotent
+	// action from an observation that was completed after its deadline.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if initial == nil || !initial.valid() {
 		return ErrInvalidArgument
 	}
 	if err := action(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
@@ -419,6 +480,12 @@ func WaitForBitmapTransition(
 		}
 		current, err := capture()
 		if err != nil {
+			return err
+		}
+		// A slow capture may return after cancellation. Do not interpret its
+		// pixels as a successful transition, and do not continue polling with a
+		// stale deadline.
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if current == nil || !current.valid() ||
@@ -506,6 +573,9 @@ func WaitUntil(ctx context.Context, interval time.Duration, predicate func() (bo
 	if err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if ok {
 		return nil
 	}
@@ -519,6 +589,9 @@ func WaitUntil(ctx context.Context, interval time.Duration, predicate func() (bo
 		}
 		ok, err = predicate()
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if ok {

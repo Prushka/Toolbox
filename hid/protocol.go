@@ -25,11 +25,13 @@ const (
 	opKeyboardReset opcode = 0x12
 	opTypeASCII     opcode = 0x13
 
-	opMouseMove  opcode = 0x20
-	opMouseAbs   opcode = 0x21
-	opMouseDown  opcode = 0x22
-	opMouseUp    opcode = 0x23
-	opMouseReset opcode = 0x24
+	opMouseMove              opcode = 0x20
+	opMouseAbs               opcode = 0x21
+	opMouseDown              opcode = 0x22
+	opMouseUp                opcode = 0x23
+	opMouseReset             opcode = 0x24
+	opMouseMoveLinearBatch   opcode = 0x25
+	opMouseMoveRelativeBatch opcode = 0x26
 
 	opReleaseAll opcode = 0x30
 	opCycleUSB   opcode = 0x31

@@ -121,6 +121,61 @@ func TestWaitForStableBitmapValidationAndCancellation(t *testing.T) {
 	}
 }
 
+func TestWaitForBitmapChangeWaitsThroughFrozenFrames(t *testing.T) {
+	frames := make([]*Bitmap, 4)
+	for index := range frames {
+		frames[index], _ = NewBitmap(1, 1)
+	}
+	frames[3].Set(0, 0, RGB{R: 10})
+	index := 0
+	err := WaitForBitmapChange(context.Background(), func() (*Bitmap, error) {
+		frame := frames[index]
+		index++
+		return frame, nil
+	}, FrameStabilityOptions{Interval: time.Millisecond, PixelTolerance: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index != len(frames) {
+		t.Fatalf("capture count = %d, want %d", index, len(frames))
+	}
+}
+
+func TestWaitForBitmapChangeRejectsLateCapture(t *testing.T) {
+	t.Parallel()
+	initial, _ := NewBitmap(1, 1)
+	changed := initial.Clone()
+	changed.Set(0, 0, RGB{R: 10})
+	captures := 0
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- WaitForBitmapChange(ctx, func() (*Bitmap, error) {
+			captures++
+			if captures == 1 {
+				return initial, nil
+			}
+			close(started)
+			<-release
+			return changed, nil
+		}, FrameStabilityOptions{Interval: time.Millisecond})
+	}()
+	<-started
+	cancel()
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("change wait error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("change wait did not stop after late capture")
+	}
+}
+
 func TestWaitForBitmapTransitionWaitsForChangeThenStability(t *testing.T) {
 	frames := make([]*Bitmap, 5)
 	for index := range frames {
@@ -181,6 +236,114 @@ func TestWaitForBitmapTransitionValidationAndActionError(t *testing.T) {
 	want := errors.New("action failed")
 	if err := WaitForBitmapTransition(context.Background(), capture, func() error { return want }, FrameStabilityOptions{}); !errors.Is(err, want) {
 		t.Fatalf("action error = %v, want %v", err, want)
+	}
+}
+
+func TestWaitForBitmapTransitionDoesNotActAfterSlowBaselineCapture(t *testing.T) {
+	t.Parallel()
+	frame, _ := NewBitmap(1, 1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	actionCalls := 0
+	done := make(chan error, 1)
+	go func() {
+		done <- WaitForBitmapTransition(ctx, func() (*Bitmap, error) {
+			close(started)
+			<-release
+			return frame, nil
+		}, func() error {
+			actionCalls++
+			return nil
+		}, FrameStabilityOptions{Interval: time.Millisecond})
+	}()
+	<-started
+	cancel()
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("transition error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("transition did not stop after baseline capture")
+	}
+	if actionCalls != 0 {
+		t.Fatalf("action calls = %d, want 0", actionCalls)
+	}
+}
+
+func TestWaitForBitmapTransitionRejectsLatePostActionCapture(t *testing.T) {
+	t.Parallel()
+	frame, _ := NewBitmap(1, 1)
+	changed, _ := NewBitmap(1, 1)
+	changed.Set(0, 0, RGB{R: 255})
+	captures := 0
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	actionCalls := 0
+	done := make(chan error, 1)
+	go func() {
+		done <- WaitForBitmapTransition(ctx, func() (*Bitmap, error) {
+			captures++
+			switch captures {
+			case 1:
+				return frame, nil
+			case 2:
+				close(started)
+				<-release
+				return changed, nil
+			default:
+				return changed, nil
+			}
+		}, func() error {
+			actionCalls++
+			return nil
+		}, FrameStabilityOptions{Interval: time.Millisecond, ConsecutiveFrames: 1})
+	}()
+	<-started
+	cancel()
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("transition error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("transition did not stop after post-action capture")
+	}
+	if actionCalls != 1 {
+		t.Fatalf("action calls = %d, want 1", actionCalls)
+	}
+}
+
+func TestWaitUntilRejectsPredicateResultAfterCancellation(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- WaitUntil(ctx, time.Millisecond, func() (bool, error) {
+			close(started)
+			<-release
+			return true, nil
+		})
+	}()
+	<-started
+	cancel()
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("wait error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("wait did not stop after predicate cancellation")
 	}
 }
 
