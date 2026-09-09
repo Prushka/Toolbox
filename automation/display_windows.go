@@ -123,11 +123,14 @@ func RestoreDisplayMode() error {
 type Monitor struct {
 	Rect, WorkArea Rect
 	Primary        bool
+	// DeviceName identifies this monitor in DisplayColors and GDI queries.
+	DeviceName string
 }
 type monitorInfo struct {
 	Size          uint32
 	Monitor, Work winRect
 	Flags         uint32
+	DeviceName    [32]uint16
 }
 
 type monitorEnumState struct {
@@ -156,7 +159,8 @@ var enumMonitorsCallback = windows.NewCallback(func(hmon, hdc, rect, data uintpt
 		WorkArea: Rect{
 			int(mi.Work.Left), int(mi.Work.Top), int(mi.Work.Right), int(mi.Work.Bottom),
 		},
-		Primary: mi.Flags&monitorInfoPrimary != 0,
+		Primary:    mi.Flags&monitorInfoPrimary != 0,
+		DeviceName: windows.UTF16ToString(mi.DeviceName[:]),
 	})
 	return 1
 })

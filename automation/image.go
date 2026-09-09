@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	_ "golang.org/x/image/bmp"
@@ -29,8 +30,18 @@ type ImageSearchOptions struct {
 
 // Template is a predecoded, prescaled image optimized for repeated searches.
 type Template struct {
-	bitmap  templateBitmap
-	options ImageSearchOptions
+	bitmap          templateBitmap
+	options         ImageSearchOptions
+	correlation     templateCorrelation
+	correlationOnce sync.Once
+}
+
+// Size returns the compiled template dimensions.
+func (t *Template) Size() (width, height int) {
+	if t == nil {
+		return 0, 0
+	}
+	return t.bitmap.Width, t.bitmap.Height
 }
 
 const maxTemplateBytes = 256 << 20
@@ -428,12 +439,6 @@ func scaledSize(w, h, ow, oh int) (int, int, error) {
 		return 0, 0, ErrInvalidRect
 	}
 	return ow, oh, nil
-}
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 func imageAt(s *Bitmap, x, y int, t templateBitmap, tolerance ColorTolerance, exact bool) bool {
 	for _, ti := range t.Anchors {

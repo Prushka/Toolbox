@@ -321,7 +321,7 @@ type FrameStabilityOptions struct {
 func BitmapsSimilar(a, b *Bitmap, pixelTolerance uint8, maxChangedFraction float64) bool {
 	if a == nil || b == nil || !a.valid() || !b.valid() ||
 		a.Width != b.Width || a.Height != b.Height ||
-		maxChangedFraction < 0 || maxChangedFraction > 1 {
+		!(maxChangedFraction >= 0 && maxChangedFraction <= 1) {
 		return false
 	}
 	pixels := a.Width * a.Height

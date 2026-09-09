@@ -33,7 +33,7 @@ func Sleep(ctx context.Context, d time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-t.C:
-		return nil
+		return ctx.Err()
 	}
 }
 
@@ -43,6 +43,9 @@ func PreciseSleep(ctx context.Context, d time.Duration) error {
 	if ctx == nil {
 		return ErrInvalidArgument
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if d <= 0 {
 		return Sleep(ctx, d)
 	}
@@ -50,7 +53,7 @@ func PreciseSleep(ctx context.Context, d time.Duration) error {
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return nil
+			return ctx.Err()
 		}
 		if remaining > 2*time.Millisecond {
 			if err := Sleep(ctx, remaining-time.Millisecond); err != nil {

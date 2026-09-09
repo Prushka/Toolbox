@@ -84,9 +84,13 @@ func readFrame(reader *bufio.Reader, magic byte) (wireFrame, error) {
 		}
 	}
 
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(reader, header); err != nil {
-		return wireFrame{}, err
+	var header [4]byte
+	for index := range header {
+		value, err := reader.ReadByte()
+		if err != nil {
+			return wireFrame{}, err
+		}
+		header[index] = value
 	}
 	frame := wireFrame{sequence: header[1], code: header[2]}
 	if header[0] != protocolVersion {
@@ -96,24 +100,31 @@ func readFrame(reader *bufio.Reader, magic byte) (wireFrame, error) {
 		return frame, errFrameLarge
 	}
 
-	payloadAndCRC := make([]byte, int(header[3])+1)
-	if _, err := io.ReadFull(reader, payloadAndCRC); err != nil {
+	if header[3] != 0 {
+		frame.payload = make([]byte, int(header[3]))
+	}
+	if _, err := io.ReadFull(reader, frame.payload); err != nil {
 		return wireFrame{}, err
 	}
-	checksumInput := append([]byte{magic}, header...)
-	checksumInput = append(checksumInput, payloadAndCRC[:len(payloadAndCRC)-1]...)
-	if crc8(checksumInput) != payloadAndCRC[len(payloadAndCRC)-1] {
-		frame.payload = append([]byte(nil), payloadAndCRC[:len(payloadAndCRC)-1]...)
+	checksum, err := reader.ReadByte()
+	if err != nil {
+		return wireFrame{}, err
+	}
+	crc := crc8([]byte{magic})
+	crc = extendCRC8(crc, header[:])
+	crc = extendCRC8(crc, frame.payload)
+	if crc != checksum {
 		return frame, errBadChecksum
 	}
-
-	frame.payload = append([]byte(nil), payloadAndCRC[:len(payloadAndCRC)-1]...)
 	return frame, nil
 }
 
 // CRC-8/SMBUS: polynomial 0x07, initial value 0, no reflection.
 func crc8(data []byte) byte {
-	var crc byte
+	return extendCRC8(0, data)
+}
+
+func extendCRC8(crc byte, data []byte) byte {
 	for _, value := range data {
 		crc ^= value
 		for range 8 {

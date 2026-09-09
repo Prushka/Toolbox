@@ -13,6 +13,12 @@ import (
 // firmware is responding. Native USB CDC ignores the nominal baud rate, but a
 // conventional value keeps diagnostics predictable.
 func Open(ctx context.Context, portName string, options ...Option) (*Client, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("hid: context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if portName == "" {
 		return nil, fmt.Errorf("hid: COM port name is empty")
 	}

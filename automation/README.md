@@ -48,6 +48,27 @@ to call concurrently and repeatedly.
 
 ## Quick start
 
+`SearchTemplate` retains exact per-channel tolerance matching.
+`SearchTemplateScore` compares spatial structure using channel-centered
+normalized correlation. It tolerates brightness offsets and common contrast
+scaling; nonlinear HDR/SDR tone mapping still needs validation against real
+captures. Flat-colored templates have no spatial contrast and return no scored
+match. Correlation state is compiled lazily and can be shared across goroutines.
+Choose `MinScore` from representative positive and negative examples.
+
+Scored search samples pixels and locations by default for speed, so it can miss
+narrow peaks. Set `TemplateMatchOptions{Exhaustive: true}` to evaluate every
+location in a small region, or use `TemplateScoreAt` when the location is known.
+The score is always bounded to [-1, 1]. `ColorRange`, `Bitmap.Count`, `Fraction`,
+and `Mean` support semantic color checks without fixed RGB equality. No image
+matching method proves that a window is unobscured or ready to accept input.
+
+`DisplayColors` reports display composition metadata. Match `DeviceName` to
+`Monitor.DeviceName`; ordering does not identify the primary monitor. On newer
+Windows versions, `ColorMode` is `"hdr"`, `"wcg"`, or `"sdr"`; an empty string
+means the newer query is unavailable. `AdvancedColorEnabled` can remain true
+for wide-gamut SDR while HDR is off. Do not treat it as an HDR-only indicator.
+
 ```go
 import (
     "context"

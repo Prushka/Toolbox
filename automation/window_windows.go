@@ -165,12 +165,18 @@ func (w Window) EnsureActive(ctx context.Context, settle time.Duration) error {
 	if ctx == nil || settle < 0 {
 		return ErrInvalidArgument
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !w.Valid() {
 		return ErrNotFound
 	}
 	active, err := ActiveWindow()
 	if err == nil && active.HWND == w.HWND {
-		return nil
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := w.Activate(); err != nil {
 		return err

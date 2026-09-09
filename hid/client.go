@@ -66,7 +66,7 @@ type config struct {
 // Option configures a Client.
 type Option func(*config) error
 
-// WithTimeout sets the maximum time to wait for a firmware acknowledgement.
+// WithTimeout bounds command writing and its firmware acknowledgement.
 func WithTimeout(timeout time.Duration) Option {
 	return func(configuration *config) error {
 		if timeout <= 0 {
@@ -130,25 +130,29 @@ type Client struct {
 	timeout   time.Duration
 	tapDelay  time.Duration
 
-	commandMu       chan struct{}
-	sequence        byte
-	responses       chan responseResult
-	readerDone      chan struct{}
-	readerOnce      sync.Once
-	readErrMu       sync.RWMutex
-	readErr         error
-	closed          atomic.Bool
-	closeOnce       sync.Once
-	closeErr        error
-	infoMu          sync.RWMutex
-	info            Info
-	infoKnown       bool
-	windowPointerMu sync.Mutex
-	windowPointer   windowPointerState
+	commandMu        chan struct{}
+	sequence         byte
+	responses        chan responseResult
+	readerDone       chan struct{}
+	readerOnce       sync.Once
+	readErrMu        sync.RWMutex
+	readErr          error
+	closed           atomic.Bool
+	closeOnce        sync.Once
+	closeErr         error
+	releaseCloseOnce sync.Once
+	releaseCloseErr  error
+	infoMu           sync.RWMutex
+	info             Info
+	infoKnown        bool
+	windowPointerMu  sync.Mutex
+	windowPointer    windowPointerState
 }
 
 // NewClient binds a client to an already-open byte stream. Most callers should
 // use Open, while tests and custom transports can use this constructor.
+// The transport must support concurrent Read, Write, and Close. Close must
+// promptly unblock pending I/O, as serial ports and net.Conn implementations do.
 func NewClient(transport io.ReadWriteCloser, options ...Option) (*Client, error) {
 	if transport == nil {
 		return nil, errors.New("hid: transport is nil")
@@ -286,12 +290,23 @@ func (client *Client) transact(ctx context.Context, operation opcode, payload []
 	if err != nil {
 		return nil, err
 	}
-	if err := writeAll(client.transport, request); err != nil {
-		return nil, fmt.Errorf("hid: write command: %w", err)
-	}
-
 	timer := time.NewTimer(client.timeout)
 	defer timer.Stop()
+	// A disconnected or flow-controlled serial device can block Write before
+	// acknowledgement waiting even begins. Closing the transport interrupts that
+	// write and prevents a partial frame from corrupting a later command.
+	written := make(chan error, 1)
+	go func() { written <- writeAll(client.transport, request) }()
+	select {
+	case err := <-written:
+		if err != nil {
+			return nil, fmt.Errorf("hid: write command: %w", errors.Join(err, client.shutdown()))
+		}
+	case <-ctx.Done():
+		return nil, fmt.Errorf("hid: write command: %w", client.finishInterruptedWrite(written, ctx.Err()))
+	case <-timer.C:
+		return nil, fmt.Errorf("hid: write command 0x%02X timed out after %s: %w", operation, client.timeout, client.finishInterruptedWrite(written, context.DeadlineExceeded))
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -334,6 +349,23 @@ func (client *Client) transact(ctx context.Context, operation opcode, payload []
 			}
 			return nil, ErrClosed
 		}
+	}
+}
+
+func (client *Client) finishInterruptedWrite(written <-chan error, interrupted error) error {
+	// The OS may have completed Write while its goroutine has not yet published
+	// the result. Allow that completion to preserve the channel for key/button
+	// cleanup; only a still-blocked or partial write requires closing the port.
+	settle := time.NewTimer(10 * time.Millisecond)
+	defer settle.Stop()
+	select {
+	case err := <-written:
+		if err == nil {
+			return interrupted
+		}
+		return errors.Join(interrupted, err, client.shutdown())
+	case <-settle.C:
+		return errors.Join(interrupted, client.shutdown())
 	}
 }
 
@@ -895,16 +927,24 @@ func (client *Client) CycleUSB(ctx context.Context, detachedFor time.Duration) e
 	return client.shutdown()
 }
 
-// Close makes a best-effort ReleaseAll request and closes the command port.
+// Close makes one bounded ReleaseAll attempt and closes the command port.
+// Release and transport errors are joined and retained for repeated callers.
 // Physically unplugging the board is also safe because Windows drops its HID
 // state and the firmware watchdog releases locally held state.
 func (client *Client) Close() error {
-	if !client.closed.Load() {
-		ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-		_, _ = client.transact(ctx, opReleaseAll, nil)
-		cancel()
+	if client == nil {
+		return nil
 	}
-	return client.shutdown()
+	client.releaseCloseOnce.Do(func() {
+		var releaseErr error
+		if !client.closed.Load() {
+			ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+			_, releaseErr = client.transact(ctx, opReleaseAll, nil)
+			cancel()
+		}
+		client.releaseCloseErr = errors.Join(releaseErr, client.shutdown())
+	})
+	return client.releaseCloseErr
 }
 
 func (client *Client) shutdown() error {

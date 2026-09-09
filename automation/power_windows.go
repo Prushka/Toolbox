@@ -29,6 +29,11 @@ type powerRequestContext struct {
 	Version            uint32
 	Flags              uint32
 	SimpleReasonString *uint16
+	// REASON_CONTEXT contains a union whose detailed member is larger than
+	// the simple string pointer. Reserve its complete native ABI storage.
+	localizedReasonID uint32
+	reasonStringCount uint32
+	reasonStrings     uintptr
 }
 
 func beginPowerRequest(options PowerRequestOptions) (func() error, error) {

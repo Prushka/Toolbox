@@ -36,7 +36,7 @@ type clientHarness struct {
 	done     chan struct{}
 }
 
-func newClientHarness(t *testing.T, handler func(wireFrame) harnessResponse, options ...Option) *clientHarness {
+func newClientHarness(t testing.TB, handler func(wireFrame) harnessResponse, options ...Option) *clientHarness {
 	t.Helper()
 	clientSide, serverSide := net.Pipe()
 	client, err := NewClient(clientSide, options...)
@@ -77,6 +77,18 @@ func newClientHarness(t *testing.T, handler func(wireFrame) harnessResponse, opt
 		<-harness.done
 	})
 	return harness
+}
+
+func BenchmarkAcknowledgedCommand(b *testing.B) {
+	harness := newClientHarness(b, nil)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if err := harness.client.Ping(b.Context()); err != nil {
+			b.Fatal(err)
+		}
+		<-harness.commands
+	}
 }
 
 func (harness *clientHarness) next(t *testing.T) wireFrame {
@@ -583,6 +595,59 @@ func TestCloseSendsReleaseAll(t *testing.T) {
 	assertCommand(t, harness.next(t), opReleaseAll, nil)
 	if err := harness.client.Close(); err != nil {
 		t.Fatalf("second Close = %v", err)
+	}
+}
+
+func TestConcurrentClosePreservesReleaseFailure(t *testing.T) {
+	harness := newClientHarness(t, func(wireFrame) harnessResponse {
+		return harnessResponse{respond: true, status: statusHIDFailure}
+	})
+	var callers sync.WaitGroup
+	for range 12 {
+		callers.Go(func() {
+			var deviceErr *DeviceError
+			if err := harness.client.Close(); !errors.As(err, &deviceErr) || deviceErr.Status != byte(statusHIDFailure) {
+				t.Errorf("Close = %v, want HID release failure", err)
+			}
+		})
+	}
+	callers.Wait()
+	assertCommand(t, harness.next(t), opReleaseAll, nil)
+	select {
+	case command := <-harness.commands:
+		t.Fatalf("Close sent extra command: %+v", command)
+	default:
+	}
+	if !harness.client.closed.Load() {
+		t.Fatal("failed release left transport open")
+	}
+}
+
+func TestCommandCancellationInterruptsBlockedWrite(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer serverSide.Close()
+	client, err := NewClient(clientSide)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.shutdown()
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- client.Ping(ctx) }()
+	// The peer never reads, so Write cannot complete until the port is closed.
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("blocked write = %v, want deadline", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		_ = client.shutdown()
+		<-done
+		t.Fatal("context deadline did not interrupt blocked write")
+	}
+	if err := client.Ping(t.Context()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("command after interrupted partial write = %v, want closed", err)
 	}
 }
 

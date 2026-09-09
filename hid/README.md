@@ -200,7 +200,8 @@ mouse movement, and batched relative mouse movement.
 
 `Open` is Windows-only. It opens the COM port, starts a reader goroutine, and
 requires a successful Info handshake. `NewClient` is available for tests and
-custom transports.
+custom transports. A custom transport must support concurrent Read, Write, and
+Close, and Close must promptly unblock pending I/O.
 
 The client is safe for concurrent command-level use:
 
@@ -211,7 +212,7 @@ The client is safe for concurrent command-level use:
 - Reader errors use an `RWMutex`.
 - `atomic.Bool` and `sync.Once` make shutdown idempotent for concurrent
   `Close` calls.
-- Context cancellation applies while waiting for the token and acknowledgement.
+- Context cancellation applies while waiting for the token, writing, and acknowledgement.
   Cleanup uses a bounded 250 ms context.
 
 Command serialization does not make a multi-command workflow atomic. A
@@ -220,7 +221,7 @@ preserves action order for its caller but does not add cross-goroutine
 isolation. Use one owner goroutine or an external mutex when exclusive workflow
 ordering matters.
 
-The default acknowledgement timeout is two seconds and the default press/click
+The default write-and-acknowledgement timeout is two seconds and the default press/click
 hold time is 20 ms:
 
 ```go
@@ -233,7 +234,10 @@ device, err := hid.Open(ctx, "COM5",
 `Press` releases a chord in reverse order, and `Click` releases its requested
 button mask. If a down command cannot be confirmed, cleanup resets the relevant
 keyboard or mouse state because the host cannot know whether firmware applied
-the timed-out command. `Close` best-effort releases all input and closes CDC.
+the timed-out command. A timeout or cancellation during a blocked write closes
+CDC to prevent a partial frame from corrupting a later command. `Close` attempts
+release once, closes CDC, and returns both release and transport errors consistently
+to repeated or concurrent callers. Applications should propagate these errors.
 Physical unplug is safe: Windows removes the HID collections, and the firmware
 watchdog/startup release clears locally held state.
 

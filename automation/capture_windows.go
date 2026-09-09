@@ -21,6 +21,7 @@ var (
 	procScreenToClient     = user32.NewProc("ScreenToClient")
 	procPrintWindow        = user32.NewProc("PrintWindow")
 	procBitBlt             = gdi32.NewProc("BitBlt")
+	procGdiFlush           = gdi32.NewProc("GdiFlush")
 	procCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
 	procDeleteDC           = gdi32.NewProc("DeleteDC")
 	procCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
@@ -78,6 +79,10 @@ func CaptureScreen(rect Rect) (*Bitmap, error) {
 	if err != nil {
 		return nil, err
 	}
+	// GetDC and ReleaseDC must execute on the same OS thread. The DIB copy
+	// also flushes that thread's GDI batch before reading its pixel storage.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	hdc, _, callErr := procGetDC.Call(0)
 	if hdc == 0 {
 		return nil, winCallError(callErr, "GetDC failed")
@@ -254,6 +259,8 @@ func capturePrintWindow(hwnd HWND, w, h int, client bool) (*Bitmap, error) {
 }
 
 func capturePrintWindowRegion(hwnd HWND, w, h int, client bool, region Rect) (*Bitmap, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	dst, bits, cleanup, err := makeDIB(w, h)
 	if err != nil {
 		return nil, err
@@ -269,10 +276,15 @@ func capturePrintWindowRegion(hwnd HWND, w, h int, client bool, region Rect) (*B
 	if ret, _, callErr := procPrintWindow.Call(uintptr(hwnd), dst, flags); ret == 0 {
 		return nil, winCallError(callErr, "PrintWindow failed")
 	}
+	if err := flushCaptureGDI(); err != nil {
+		return nil, err
+	}
 	return dibRegionToBitmap(bits, w, h, region)
 }
 
 func captureFromDC(src uintptr, left, top, w, h int) (*Bitmap, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	left32, ok := toWinInt32(left)
 	if !ok {
 		return nil, ErrInvalidArgument
@@ -289,7 +301,20 @@ func captureFromDC(src uintptr, left, top, w, h int) (*Bitmap, error) {
 	if ret, _, callErr := procBitBlt.Call(dst, 0, 0, uintptr(w), uintptr(h), src, uintptr(left32), uintptr(top32), srcCopy); ret == 0 {
 		return nil, winCallError(callErr, "BitBlt failed")
 	}
+	if err := flushCaptureGDI(); err != nil {
+		return nil, err
+	}
 	return dibToBitmap(bits, w, h)
+}
+
+// CreateDIBSection requires GDI writes to finish before direct access to bits.
+// GdiFlush flushes only the calling thread; callers must remain thread-bound
+// from drawing through this call and the pixel copy.
+func flushCaptureGDI() error {
+	if ret, _, _ := procGdiFlush.Call(); ret == 0 {
+		return fmt.Errorf("automation: GdiFlush reported a failed drawing operation")
+	}
+	return nil
 }
 func makeDIB(w, h int) (uintptr, unsafe.Pointer, func(), error) {
 	if w <= 0 || h <= 0 || w > 1<<31-1 || h > 1<<31-1 {
@@ -376,6 +401,8 @@ func PixelColor(x, y int) (RGB, error) {
 	if !ok {
 		return RGB{}, ErrInvalidArgument
 	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	hdc, _, callErr := procGetDC.Call(0)
 	if hdc == 0 {
 		return RGB{}, winCallError(callErr, "GetDC failed")

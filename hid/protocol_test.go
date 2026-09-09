@@ -58,3 +58,33 @@ func TestEncodeFrameRejectsLargePayload(t *testing.T) {
 		t.Fatalf("encodeFrame error = %v, want payload-size error", err)
 	}
 }
+
+func TestFrameRejectsEveryTruncatedPrefix(t *testing.T) {
+	encoded, err := encodeFrame(requestMagic, 255, byte(opTypeASCII), bytes.Repeat([]byte{0x5A}, maxPayload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for length := 0; length < len(encoded); length++ {
+		if _, err := readFrame(bufio.NewReader(bytes.NewReader(encoded[:length])), requestMagic); err == nil {
+			t.Errorf("accepted truncated prefix of %d bytes", length)
+		}
+	}
+}
+
+func FuzzFrameRoundTrip(f *testing.F) {
+	f.Add(byte(0), byte(opPing), []byte{})
+	f.Add(byte(255), byte(opTypeASCII), bytes.Repeat([]byte{0xA5}, maxPayload))
+	f.Fuzz(func(t *testing.T, sequence, code byte, payload []byte) {
+		if len(payload) > maxPayload {
+			return
+		}
+		encoded, err := encodeFrame(requestMagic, sequence, code, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		frame, err := readFrame(bufio.NewReader(bytes.NewReader(encoded)), requestMagic)
+		if err != nil || frame.sequence != sequence || frame.code != code || !bytes.Equal(frame.payload, payload) {
+			t.Fatalf("round trip changed frame: %+v, %v", frame, err)
+		}
+	})
+}
