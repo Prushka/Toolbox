@@ -249,6 +249,10 @@ func (m *InputMonitor) Close() error {
 	if err != nil {
 		select {
 		case <-m.done:
+			// Shutdown can publish both its reply and done before the
+			// request waiter runs. Selecting done is still a completed Close;
+			// preserve the final cleanup result, not ErrMonitorClosed.
+			err = m.Err()
 		default:
 			m.closeRequested = false
 		}

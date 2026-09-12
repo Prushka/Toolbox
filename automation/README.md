@@ -12,8 +12,9 @@ other processes, or security-bypass features. It provides both event-driven
 input monitoring and direct keyboard/mouse state polling so callers can
 implement their own action triggers.
 
-The Windows implementation uses documented User32, GDI32, Kernel32, and WinMM
-APIs. Ordinary visible capture uses the desktop device context and `BitBlt`; it
+The Windows implementation uses User32, GDI32, Kernel32, and WinMM APIs.
+Except for the optional ghost-window mapping described below, these APIs are
+documented. Ordinary visible capture uses the desktop device context and `BitBlt`; it
 does not message the target window or open a target-process handle.
 `InputMonitor`, `CapturePrintWindow`, process-path queries, and process-priority
 changes are explicit interactions with normal documented Windows behavior:
@@ -28,11 +29,19 @@ changes are explicit interactions with normal documented Windows behavior:
   query-limited process handle.
 - `SetProcessPriority` opens a process handle with permission to change its
   priority class.
-- `OpenProcess` opens query, synchronization, and termination rights and pins
-  that process object. `Process.Wait` observes exit, `Terminate` explicitly ends
-  the pinned process, and `Close` releases the handle without ending it. Process
-  recovery policy and authorization belong to the application. `Window.IsHung`
-  reports Windows' message-pump hang assessment, not GPU rendering progress.
+- `OpenProcess` opens only query and synchronization rights and pins that process
+  object. `Process.Wait` observes exit. `Terminate` separately requests termination
+  permission and verifies both handles refer to the same kernel object with
+  `CompareObjectHandles` (Windows 10 or later), before honoring an uncanceled
+  termination request. Permission denial or unavailable comparison is an error;
+  normal observation still works. `Close` releases the observation handle without
+  ending the process. Recovery policy and authorization belong to the application.
+- `Window.IsHung` reports Windows' message-pump assessment, not GPU rendering
+  progress. `Window.GhostWindow` uses the optional, undocumented User32 exports
+  `GhostWindowFromHungWindow` and `HungWindowFromGhostWindow` to verify reciprocal
+  ownership of a replacement window. Missing exports return `ErrUnsupported`;
+  absent or stale mappings return `ErrNotFound`. It never guesses from window
+  titles or geometry and does not activate, message, or capture the window.
 
 `FrameProgress.Observe` measures continuously observed unchanged frames.
 Configure `MaxGap` and call `Reset` when capture is unusable. Missing samples,

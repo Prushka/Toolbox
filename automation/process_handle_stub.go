@@ -6,7 +6,8 @@ import "context"
 
 type Process struct{}
 
-func (Window) IsHung() bool { return false }
+func (Window) IsHung() bool                 { return false }
+func (Window) GhostWindow() (Window, error) { return Window{}, ErrUnsupported }
 
 func OpenProcess(uint32) (*Process, error)       { return nil, ErrUnsupported }
 func (*Process) PID() uint32                     { return 0 }

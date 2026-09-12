@@ -99,19 +99,27 @@ Keep additions generic, documented, and covered by offline tests.
   `MaxGap` reset proof. The consumer owns desktop usability, screen semantics,
   duration thresholds, and restart policy. The tracker is owned by one goroutine
   and retains immutable capture data.
-- `OpenProcess` pins a Windows process handle with query, synchronization, and
-  termination rights. `Process.Path` and `PID` identify that process; `Wait` and
-  `Terminate` act on the pinned object, never a later reused PID. `Close` releases
-  the handle without terminating the process. Termination is explicitly opt-in
-  to the caller and rejects canceled contexts. `Window.IsHung` exposes Windows'
-  message-pump assessment; false does not prove GPU rendering progress. Tests
-  terminate only a disposable test child, never the BTD6 consumer.
+- `OpenProcess` pins a Windows process handle with only query and synchronization
+  rights, so observation does not require permission to terminate. `Terminate`
+  requests termination permission only when called and uses `CompareObjectHandles`
+  to verify that the new handle identifies the pinned kernel object. Cancellation,
+  permission denial, unavailable identity comparison, and mismatched objects
+  prevent termination. `Close` only releases the observation handle.
+  `Window.IsHung` exposes Windows' message-pump assessment; false does not prove
+  GPU rendering progress. `Window.GhostWindow` optionally resolves Windows'
+  replacement through reciprocal User32 ghost/HWND mappings, never title or
+  geometry. Those undocumented exports are queried dynamically; missing exports
+  return `ErrUnsupported` and stale mappings return `ErrNotFound`. Consumers must
+  still verify the original PID, foreground, visibility, and desktop usability.
+  Tests terminate only disposable children, never the BTD6 consumer.
 - `Window.EnsureActive` rejects cancellation before native window access and
   never reports an already-active window as successful for a canceled context.
 - `WaitUntil` evaluates immediately, then on a ticker, and stops on
   cancellation. Contexts and callbacks are validated rather than panicking.
   `IsContextCancellation` recognizes cancellation-only error trees and rejects
   errors joined with cleanup failures; consumers use it when stopping workers.
+  `InputMonitor.Close` joins native shutdown and reports its final cleanup
+  result even if the done notification races the close-command acknowledgement.
 
 ## HID Contracts
 
