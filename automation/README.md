@@ -28,6 +28,18 @@ changes are explicit interactions with normal documented Windows behavior:
   query-limited process handle.
 - `SetProcessPriority` opens a process handle with permission to change its
   priority class.
+- `OpenProcess` opens query, synchronization, and termination rights and pins
+  that process object. `Process.Wait` observes exit, `Terminate` explicitly ends
+  the pinned process, and `Close` releases the handle without ending it. Process
+  recovery policy and authorization belong to the application. `Window.IsHung`
+  reports Windows' message-pump hang assessment, not GPU rendering progress.
+
+`FrameProgress.Observe` measures continuously observed unchanged frames.
+Configure `MaxGap` and call `Reset` when capture is unusable. Missing samples,
+invalid bitmaps, and non-increasing timestamps reset the measurement; elapsed
+time without observations cannot establish a freeze. Supply immutable captures
+from one goroutine. The consumer decides which screens should animate and what
+action, if any, to take after prolonged inactivity.
 
 This is a small, passive-by-default footprint, not a promise of invisibility
 or compatibility with every application. Mouse hooks and global hotkey

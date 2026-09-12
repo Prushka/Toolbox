@@ -28,7 +28,8 @@ Keep additions generic, documented, and covered by offline tests.
   windows and DPI (`window_windows.go`), display modes and advanced color
   (`display_windows.go`, `display_color_windows.go`), input monitoring and
   polling (`monitor*.go`, `input*.go`), timing (`timing*.go`), power requests
-  (`power*.go`). Non-Windows stubs return `ErrUnsupported`.
+  (`power*.go`), continuous frame progress (`frame_progress.go`), and pinned
+  process lifecycle (`process_handle*.go`). Non-Windows stubs return `ErrUnsupported`.
 - `hid/`: Arduino Leonardo keyboard/mouse over USB CDC. Framing and CRC
   (`protocol.go`), command client (`client.go`), Windows cursor alignment
   (`screen_windows.go`), actions (`actions.go`), port discovery
@@ -93,6 +94,18 @@ Keep additions generic, documented, and covered by offline tests.
   stability. Both reject captures that complete after context cancellation.
   Bitmap similarity and color saturation/value comparisons reject NaN limits
   instead of allowing unordered floating-point comparisons to pass.
+- `FrameProgress` tracks continuously observed unchanged bitmaps using monotonic
+  timestamps. Invalid frames, non-increasing time, or observation gaps exceeding
+  `MaxGap` reset proof. The consumer owns desktop usability, screen semantics,
+  duration thresholds, and restart policy. The tracker is owned by one goroutine
+  and retains immutable capture data.
+- `OpenProcess` pins a Windows process handle with query, synchronization, and
+  termination rights. `Process.Path` and `PID` identify that process; `Wait` and
+  `Terminate` act on the pinned object, never a later reused PID. `Close` releases
+  the handle without terminating the process. Termination is explicitly opt-in
+  to the caller and rejects canceled contexts. `Window.IsHung` exposes Windows'
+  message-pump assessment; false does not prove GPU rendering progress. Tests
+  terminate only a disposable test child, never the BTD6 consumer.
 - `Window.EnsureActive` rejects cancellation before native window access and
   never reports an already-active window as successful for a canceled context.
 - `WaitUntil` evaluates immediately, then on a ticker, and stops on
