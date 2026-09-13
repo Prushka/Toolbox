@@ -11,8 +11,9 @@ const (
 )
 
 type CaptureOptions struct {
-	ClientOnly bool
-	Method     CaptureMethod
+	RequireActiveDisplay bool
+	ClientOnly           bool
+	Method               CaptureMethod
 }
 
 func CaptureScreen(Rect) (*Bitmap, error)                             { return nil, ErrUnsupported }

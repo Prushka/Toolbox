@@ -10,12 +10,13 @@ import (
 )
 
 var (
-	ErrUnsupported     = errors.New("automation: unsupported on this platform")
-	ErrInvalidRect     = errors.New("automation: invalid rectangle")
-	ErrInvalidArgument = errors.New("automation: invalid argument")
-	ErrNotFound        = errors.New("automation: not found")
-	ErrMonitorActive   = errors.New("automation: input monitor already active")
-	ErrMonitorClosed   = errors.New("automation: input monitor closed")
+	ErrUnsupported        = errors.New("automation: unsupported on this platform")
+	ErrInvalidRect        = errors.New("automation: invalid rectangle")
+	ErrInvalidArgument    = errors.New("automation: invalid argument")
+	ErrNotFound           = errors.New("automation: not found")
+	ErrDisplayUnavailable = errors.New("automation: no active display is available for visible capture")
+	ErrMonitorActive      = errors.New("automation: input monitor already active")
+	ErrMonitorClosed      = errors.New("automation: input monitor closed")
 )
 
 // HWND is an opaque native window handle.

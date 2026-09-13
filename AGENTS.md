@@ -60,6 +60,13 @@ Keep additions generic, documented, and covered by offline tests.
   prior mode can fail until the desktop is restored. Keep the active display
   mode during further live acceptance. A fallback monitor is not proof of a
   usable visible desktop, and changing resolution is not a valid workaround.
+- `RequireActiveDisplay` checks current active display paths and their target
+  availability without querying HDR capabilities. No available target, or loss
+  of console access, returns `ErrDisplayUnavailable`; a sleeping monitor that
+  remains connected can still report an available path. This is not a backlight
+  or application-rendering check. `CaptureOptions.RequireActiveDisplay` opts
+  window captures and searches into checks before and after capture, discarding
+  a bitmap if the display disappears. Default capture behavior is unchanged.
 - Template search has two modes:
   - `SearchTemplate` is the AutoHotkey-style per-channel tolerance match. It
     is exact and fast but fails when display tone mapping, anti-aliasing, or

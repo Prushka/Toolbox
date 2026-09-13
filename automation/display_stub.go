@@ -26,3 +26,5 @@ type DisplayColorInfo struct {
 }
 
 func DisplayColors() ([]DisplayColorInfo, error) { return nil, ErrUnsupported }
+
+func RequireActiveDisplay() error { return ErrUnsupported }

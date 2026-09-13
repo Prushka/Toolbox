@@ -212,6 +212,15 @@ path. Native dimensions and Go allocation sizes are checked before allocation.
 
 `CaptureOptions` selects the following behavior:
 
+Set `RequireActiveDisplay: true` for visible automation that must stop when its
+display disconnects. Window captures and searches check active path/target
+availability before and after capture and return `ErrDisplayUnavailable` instead
+of a fallback bitmap. `RequireActiveDisplay()` performs the same check without
+capturing, for example before sending input. It does not depend on HDR support,
+change display settings, or measure backlight power. A sleeping monitor that
+Windows still reports as connected may pass. The default is false, preserving
+capture behavior for other callers.
+
 | Method | Behavior | Use it when | Limitation |
 | --- | --- | --- | --- |
 | `CaptureVisible` (zero/default) | Copies the visible desktop pixels beneath the requested screen/client rectangle. | Matching what a person can currently see; normal pixel/image searches. | Other windows, overlays, minimization, or off-screen placement are reflected in the bitmap. |

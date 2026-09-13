@@ -96,6 +96,12 @@ func CaptureScreen(rect Rect) (*Bitmap, error) {
 // target process. PrintWindow is synchronous and may block in the target's
 // window procedure.
 func CaptureWindow(hwnd HWND, opts CaptureOptions) (*Bitmap, error) {
+	return captureWithDisplayCheck(opts.RequireActiveDisplay, RequireActiveDisplay, func() (*Bitmap, error) {
+		return captureWindow(hwnd, opts)
+	})
+}
+
+func captureWindow(hwnd HWND, opts CaptureOptions) (*Bitmap, error) {
 	if hwnd == 0 {
 		return nil, ErrNotFound
 	}
@@ -148,6 +154,12 @@ func CaptureWindow(hwnd HWND, opts CaptureOptions) (*Bitmap, error) {
 // CaptureWindowRegion captures a client-relative region without capturing the
 // rest of the window. Regions are clipped to the client area.
 func CaptureWindowRegion(hwnd HWND, region Rect, opts CaptureOptions) (*Bitmap, error) {
+	return captureWithDisplayCheck(opts.RequireActiveDisplay, RequireActiveDisplay, func() (*Bitmap, error) {
+		return captureWindowRegion(hwnd, region, opts)
+	})
+}
+
+func captureWindowRegion(hwnd HWND, region Rect, opts CaptureOptions) (*Bitmap, error) {
 	if hwnd == 0 {
 		return nil, ErrNotFound
 	}
@@ -220,8 +232,11 @@ const (
 )
 
 type CaptureOptions struct {
-	ClientOnly bool
-	Method     CaptureMethod
+	// RequireActiveDisplay checks Windows display availability before and after
+	// capture. The zero value preserves capture without a topology requirement.
+	RequireActiveDisplay bool
+	ClientOnly           bool
+	Method               CaptureMethod
 }
 type winPoint struct{ X, Y int32 }
 
