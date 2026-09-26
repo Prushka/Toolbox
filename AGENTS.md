@@ -42,6 +42,14 @@ Keep additions generic, documented, and covered by offline tests.
 
 ## Automation Contracts
 
+- `ScreenSaverTimeout` and `SetScreenSaverTimeout` read/change only the Windows
+  screen saver idle timeout, in positive whole seconds. A nonpersistent change
+  lasts for the Windows session; a persistent change also updates the user
+  profile. Consumers own cross-process synchronization and crash restoration.
+  These calls do not change screen saver activation, password policy, display
+  power timers, or send input. Setter tests never change live user settings by
+  default; Apps provides an explicitly enabled guard integration test.
+
 - `automation` never synthesizes keyboard or mouse input and never injects
   into processes. Input goes through `hid`.
 - Coordinates: `Rect` is half-open; a zero `Rect{}` means the whole bitmap or

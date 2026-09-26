@@ -558,6 +558,16 @@ by the polling API.
 
 ## Concurrency and performance contracts
 
+`ScreenSaverTimeout()` reads the current Windows screen saver idle timeout.
+`SetScreenSaverTimeout(timeout, persist)` accepts a positive whole number of
+seconds fitting a Windows UINT. With `persist=false`, it changes only the live
+Windows session; with `persist=true`, it also saves the value to the user profile.
+It does not enable or disable screen saving or change password or monitor sleep
+settings. Consumers must serialize changes and arrange restoration, including
+after process failure; the setting is not a process-owned power request.
+Read back the timeout when exact values matter: Windows can wrap very large
+values during its internal conversion to milliseconds.
+
 | Component | Contract |
 | --- | --- |
 | `Template` | Immutable after construction and safe for concurrent `SearchTemplate` calls. |
